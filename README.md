@@ -23,7 +23,6 @@ An R pipeline for predicting continuous spatial variation in genetic diversity m
 ## Workflow Architecture
 ```mermaid
 graph TD
-    %% Estilos de los nodos
     classDef process fill:#f9f9f9,stroke:#333,stroke-width:1px,text-align:left;
 
     subgraph Step1 ["1. Data Ingestion & Spatial Preprocessing"]
@@ -42,7 +41,7 @@ graph TD
     Step2 --> Step3
 
     class A1,B1,C1 process;
-	```
+```
 ---
 
 ## Dependencies
