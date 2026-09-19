@@ -5,6 +5,8 @@
 
 suppressPackageStartupMessages({
   library(terra)
+  library(fields)
+  library(adespatial)
   library(sf)
   library(ranger)
   library(patchwork)
@@ -200,7 +202,7 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
   
   data_aggregated_sf_sp <- cbind(data_aggregated_sf, ext_direct_clean)
   data_aggregated_sf    <- sf::st_drop_geometry(data_aggregated_sf_sp)
-  
+  rm(ext_direct_clean);gc()
   # ------------------------------------------------------------------------------
   # 3. VARIABLE SELECTION — data preparation
   # ------------------------------------------------------------------------------
@@ -213,6 +215,33 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
   data_aggregated_sf_sp_sel <- data_aggregated_sf_sp[valid_rows, ]
   
   n_samples <- nrow(data_sel)
+  
+  #-------------------------------------------------------------------------------
+  # 1. Convert sampling coordinates to a terra SpatVector (EPSG:4326 / WGS84)
+  crs_planar <- "+proj=aea +lat_1=19 +lat_2=-41 +lat_0=-11 +lon_0=-76 +datum=WGS84 +units=m"
+  
+  coords_matrix <- cbind(
+    lon = as.numeric(data_aggregated_sf_sp_sel$lon),
+    lat = as.numeric(data_aggregated_sf_sp_sel$lat)
+  )
+  sample_pts <- terra::vect(coords_matrix, type = "points", crs = "EPSG:4326")
+  feat_lines <- terra::rasterize(sample_pts, bios[[1]], touches = TRUE)
+  feat_lines_planar <- terra::project(feat_lines, crs_planar, method = "near")
+  
+  x_dist_planar <- terra::distance(feat_lines_planar, unit = "km")
+  # plot(x_dist_planar)
+  
+  x_dist <- terra::project(x_dist_planar, bios[[1]])
+  # x_dist <- terra::mask(x_dist, bios[[1]])
+  names(x_dist) <- "dist_points"
+  ext_dist <- terra::extract(x_dist, sample_pts,nearest = TRUE)
+  x_dist <- terra::mask(x_dist, bios[[1]])
+  writeRaster(x_dist,file.path(outdir, paste0(sp_name,"_","DIST.tif")),overwrite=T)
+  rm(x_dist_planar,feat_lines_planar,sample_pts,coords_matrix);gc()
+  
+  data_sel$dist_points <- as.numeric(ext_dist[,2])
+  data_aggregated_sf_sp_sel$dist_points <- as.numeric(ext_dist[,2])
+  bios <- c(bios,x_dist)
   # ------------------------------------------------------------------------------
   # 3b + 4-5. NESTED LOOCV: BORUTA AND HYPERPARAMETERS ARE REDONE PER FOLD
   # (Previously, Boruta was run only once on the full set of cells, which
@@ -261,7 +290,7 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
     tuning_grid <- expand.grid(
       num.trees = c(500, 1000, 2000, 5000, 10000),
       mtry = mtry_vals,
-      min.node.size = unique(c(1, 3, 5, max_node))
+      min.node.size = unique(c(1, 3, 5, 8, max_node))
     )
     
     res <- vector("list", nrow(tuning_grid))

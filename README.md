@@ -74,6 +74,7 @@ install.packages(c(
 ### Usage Example
 
 # Load workflow function
+
 source("RF_LOOCV.R")
 
 # Run execution pipeline
@@ -91,7 +92,7 @@ RF_LOOCV(
 ```
 
 
-###Key Methodological References
+### Key Methodological References
 - Ranger: Wright, M. N., & Ziegler, A. (2017). ranger: A Fast Implementation of Random Forests for High Dimensional Data in C++ and R. Journal of Statistical Software, 77(1), 1–17.
 - Boruta: Kursa, M. B., & Rudnicki, W. R. (2010). Feature Selection with the Boruta Package. Journal of Statistical Software, 36(11), 1–13.
 - MESS: Elith, J., Kearney, M., & Phillips, S. (2010). The art of modelling range-shifting species. Methods in Ecology and Evolution, 1(4), 330–342.
