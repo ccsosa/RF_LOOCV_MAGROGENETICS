@@ -133,7 +133,8 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
   data <- readxl::read_xlsx(data_path, sheet = "data")
   data <- data %>% 
     dplyr::filter(sp == sp_name, !is.na(Ho))
-  
+  #remove empty coords
+  data <- data[which(!is.na(data$lat)),]
   # Build the initial sf point object
   my_sf_object <- sf::st_as_sf(data, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
   puntos_vect  <- terra::vect(my_sf_object)
