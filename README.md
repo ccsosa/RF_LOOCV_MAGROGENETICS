@@ -21,31 +21,28 @@ An R pipeline for predicting continuous spatial variation in genetic diversity m
 ---
 
 ## Workflow Architecture
-┌──────────────────────────────────────────────────────────────┐
-│ 1. Data Ingestion & Spatial Preprocessing                    │
-│    • Snap genetic points to environmental grid cells         │
-│    • Aggregate duplicate cell samples (mean Ho, sample count) │
-│    • Extract focal-smoothed bioclimatic covariates           │
-└──────────────────────────────┬───────────────────────────────┘
-│
-▼
-┌──────────────────────────────────────────────────────────────┐
-│ 2. Fully Nested Leave-One-Out Cross-Validation (LOOCV)       │
-│    For fold i in 1..N:                                       │
-│    ├── Boruta Consensus Feature Selection (Training set)    │
-│    ├── Hyperparameter Grid Search (OOB R² optimization)      │
-│    └── Fit model on train set & predict held-out cell i      │
-└──────────────────────────────┬───────────────────────────────┘
-│
-▼
-┌──────────────────────────────────────────────────────────────┐
-│ 3. Production Model & Spatial Projections                    │
-│    • Re-run Boruta & grid search on complete dataset       │
-│    • Fit final production Random Forest model                │
-│    • Chunked prediction restricted to binary SDM footprint   │
-│    • Mask spatial output using MESS (keep MESS > 0)           │
-│    • Calculate Moran's I on LOOCV residuals                  │
-└──────────────────────────────┴───────────────────────────────┘
+```mermaid
+graph TD
+    %% Estilos de los nodos
+    classDef process fill:#f9f9f9,stroke:#333,stroke-width:1px,text-align:left;
+
+    subgraph Step1 ["1. Data Ingestion & Spatial Preprocessing"]
+        A1["• Snap genetic points to environmental grid cells<br>• Aggregate duplicate cell samples (mean Ho, sample count)<br>• Extract focal-smoothed bioclimatic covariates"]
+    end
+
+    subgraph Step2 ["2. Fully Nested Leave-One-Out Cross-Validation (LOOCV)"]
+        B1["For fold i in 1..N:<br> ├── Boruta Consensus Feature Selection (Training set)<br> ├── Hyperparameter Grid Search (OOB R² optimization)<br> └── Fit model on train set & predict held-out cell i"]
+    end
+
+    subgraph Step3 ["3. Production Model & Spatial Projections"]
+        C1["• Re-run Boruta & grid search on complete dataset<br>• Fit final production Random Forest model<br>• Chunked prediction restricted to binary SDM footprint<br>• Mask spatial output using MESS (keep MESS > 0)<br>• Calculate Moran's I on LOOCV residuals"]
+    end
+
+    Step1 --> Step2
+    Step2 --> Step3
+
+    class A1,B1,C1 process;
+	```
 ---
 
 ## Dependencies
