@@ -13,6 +13,7 @@ An R pipeline for predicting continuous spatial variation in genetic diversity m
 * **Spatial Processing & Point Aggregation**: Automatically snaps out-of-coverage sample coordinates to the nearest valid raster cell (using a 5 km buffer) and aggregates multiple samples falling in the same cell.
 * **Coastal & Marine Edge Correction**: Employs focal spatial smoothing (`terra::focal`) and nearest-neighbor fallback extractions to avoid `NA` predictor values at complex coastal edges.
 * **Strictly Nested LOOCV**: Variable selection (Boruta consensus) and hyperparameter grid searches (`num.trees`, `mtry`, `min.node.size`) are independently executed *within* each cross-validation fold to prevent data leakage from held-out test cells.
+* **Creates distances among coordinate raster file as predictor**
 * **MESS Interpolation Masking**: Computes a Multivariate Environmental Similarity Surface (MESS) to restrict spatial projections strictly to regions of environmental interpolation ($MESS > 0$), masking out novel/extrapolated environmental spaces.
 * **Spatial Autocorrelation Diagnostics**: Assesses spatial dependence in cross-validation residuals using Moran's $I$ with inverse-distance spatial weighting (`ape::Moran.I`).
 * **Memory-Efficient Spatial Prediction**: Predicts raster outputs in chunks to manage memory overhead across large high-resolution extents.
@@ -63,6 +64,12 @@ install.packages(c(
 - lon, lat: Georeferenced sample coordinates in WGS84 (EPSG:4326).
 - Environmental Rasters (raster_dir): Directory containing continuous predictor raster layers in standard GeoTIFF format (.tif).
 - Binary SDM Raster (sdm_path): A binary Species Distribution Model raster (1 = suitable/presence, 0/NA = unsuitable) to restrict spatial projections.
+
+## Predictor layers:
+- Worldclim
+- Land use
+- Distance to coastline and rivers
+- Distances among coordinates
 
 ### Usage Example
 
