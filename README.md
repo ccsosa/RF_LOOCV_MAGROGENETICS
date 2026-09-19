@@ -93,3 +93,7 @@ RF_LOOCV(
 
 # Authors:
 Chrystian C. Sosa, Jorge Gómez-Marulanda, Victor Hugo García-Merchán
+
+# IA declaration
+
+This repo was done with the help of Gemini Flash 5.0 model adapting the methodology of Sosa et al., (2023) and adding a Leave-One-Out croosvalidation as well as improving the ranger hyperparameters and variable selection
