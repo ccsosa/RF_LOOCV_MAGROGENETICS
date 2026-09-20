@@ -8,7 +8,7 @@
 #' @param n_cores \code{integer}. Number of processing cores. Default is \code{6L}.
 #' @param cor_cutoff \code{numeric}. Absolute pairwise Pearson correlation threshold. Default is \code{0.5}.
 #' @param addLonLat \code{logical}. Retain explicit lon/lat coordinates. Default is \code{FALSE}.
-#' @param use_loocv \code{logical}. If \code{TRUE}, executes LOOCV (ignored if \code{use_blockcv = TRUE} and n >= 100). Default is \code{FALSE}.
+#' @param use_loocv \code{logical}. If \code{TRUE}, executes LOOCV (ignored if \code{use_blockcv = TRUE}). Default is \code{FALSE}.
 #' @param use_blockcv \code{logical}. If \code{TRUE} and points >= 100, executes Spatial Block CV via \code{blockCV}. Default is \code{FALSE}.
 #' @param kernel_type \code{character}. SVM kernel (\code{"svmRadial"} or \code{"svmLinear"}). Default is \code{"svmRadial"}.
 #' @param aggregate_occs_cells \code{logical}. Aggregate occurrences by raster cell. Default is \code{TRUE}.
@@ -44,7 +44,7 @@ svr_ho_pipeline <- function(outdir,
                             addLonLat = FALSE,
                             use_loocv = FALSE,
                             use_blockcv = FALSE,
-                            kernel_type = "svmLinear",
+                            kernel_type = "svmRadial",
                             aggregate_occs_cells = TRUE) {
   
   dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
@@ -124,7 +124,6 @@ svr_ho_pipeline <- function(outdir,
     message("Coastal points with NA values detected. Extracting values from nearest valid pixel...")
     na_rows <- which(!complete.cases(ext_direct))
     for (i in na_rows) {
-      # print(i)
       ext_nearest <- terra::extract(bios_focal, unique_points_vect[i, ], nearest = TRUE)
       ext_direct[i, names(bios)] <- ext_nearest[, names(bios)]
     }
@@ -175,7 +174,7 @@ svr_ho_pipeline <- function(outdir,
   }
   
   # ------------------------------------------------------------------------------
-  # 4. SVR MODEL TRAINING & VALIDATION SCHEME
+  # 4. SVR MODEL TRAINING & VALIDATION SCHEME EVALUATION
   # ------------------------------------------------------------------------------
   if(isTRUE(aggregate_occs_cells)){
     weights_vec    <- sqrt(data_sel_model$n_samples_in_cell)
@@ -184,14 +183,12 @@ svr_ho_pipeline <- function(outdir,
     weights_vec    <- NULL
   }
   
-  # Evaluación del esquema de validación (blockCV vs LOOCV vs Repeated CV)
   applied_blockcv <- FALSE
   
   if (isTRUE(use_blockcv)) {
     if (n_samples >= 100) {
       message(sprintf("Validation scheme: Spatial Block Cross-Validation (blockCV) [n = %d >= 100]", n_samples))
       
-      # Extraer objeto sf filtrado por datos válidos
       data_sf_model <- data_aggregated_sp[valid_rows, ]
       
       set.seed(123)
@@ -215,22 +212,22 @@ svr_ho_pipeline <- function(outdir,
       applied_blockcv <- TRUE
       
     } else {
-      message(sprintf("WARNING: 'use_blockcv = TRUE' requested, but n = %d (< 100).", n_samples))
-      message("Falling back to standard Cross-Validation scheme...")
-      return(NULL) # Sale de la función limpiamente devolviendo NULL
+      message(sprintf("[ESCENARIO DESCARTADO] 'use_blockcv = TRUE' solicitado, pero n = %d (< 100).", n_samples))
+      message("--> Finalizando ejecucion de este escenario sin generar resultados.\n")
+      return(NULL)
     }
   }
   
   if (!applied_blockcv) {
     if (isTRUE(use_loocv)) {
-      message("Validation scheme: LOOCV")
+      message(sprintf("Validation scheme: Leave-One-Out CV (LOOCV) [n = %d]", n_samples))
       train_ctrl <- caret::trainControl(
         method = "LOOCV",
         savePredictions = "final",
         allowParallel = TRUE
       )  
     } else {
-      message("Validation scheme: Repeated 5-Fold CV (10 repeats)")
+      message(sprintf("Validation scheme: Repeated 5-Fold CV (10 repeats) [n = %d]", n_samples))
       train_ctrl <- caret::trainControl(
         method = "repeatedcv",
         number = 5,
@@ -241,6 +238,18 @@ svr_ho_pipeline <- function(outdir,
     }
   }
   
+  # Etiqueta estandarizada para identificar la validación en los archivos
+  val_scheme_str <- if (applied_blockcv) {
+    "BLOCKCV"
+  } else if (isTRUE(use_loocv)) {
+    "LOOCV"
+  } else {
+    "REPEATEDCV"
+  }
+  
+  # ------------------------------------------------------------------------------
+  # ENTRENAMIENTO SVM
+  # ------------------------------------------------------------------------------
   cl <- makeCluster(n_cores)
   registerDoParallel(cl)
   
@@ -320,15 +329,18 @@ svr_ho_pipeline <- function(outdir,
   test_mae  <- yardstick::mae_vec(cv_df$Observed, cv_df$Predicted)
   test_rsq  <- yardstick::rsq_vec(cv_df$Observed, cv_df$Predicted)
   
+  # Inclusión explícita del esquema de validación y parámetros en las métricas
   metrics_out <- data.frame(
-    .metric = c("rmse", "mae", "rsq", "rmse", "mae", "rsq"),
-    mean    = c(test_rmse, test_mae, test_rsq, train_rmse, train_mae, train_rsq),
-    dataset = c("validation_test", "validation_test", "validation_test", "train", "train", "train")
+    .metric           = c("rmse", "mae", "rsq", "rmse", "mae", "rsq"),
+    mean              = c(test_rmse, test_mae, test_rsq, train_rmse, train_mae, train_rsq),
+    dataset           = c("validation_test", "validation_test", "validation_test", "train", "train", "train"),
+    validation_scheme = val_scheme_str,
+    kernel_type       = kernel_type,
+    add_lon_lat       = addLonLat
   )
   
-  suffix <- paste0("_", kernel_type, 
-                   if(applied_blockcv) "_BLOCKCV" else "", 
-                   if(addLonLat) "_LONLAT" else "")
+  # Construcción del sufijo único para nombres de archivo
+  suffix <- paste0("_", kernel_type, "_", val_scheme_str, if(addLonLat) "_LONLAT" else "")
   
   if(isTRUE(aggregate_occs_cells)){
     file_to_save <- file.path(outdir, paste0(sp_name, "_SVM_Metrics_CELLS", suffix, ".csv"))
@@ -359,7 +371,7 @@ svr_ho_pipeline <- function(outdir,
   test_subtitle <- if (applied_blockcv) {
     "Spatial Block Cross-Validation (blockCV)"
   } else if (use_loocv) {
-    "Leave-One-Out CV"
+    "Leave-One-Out CV (LOOCV)"
   } else {
     "Repeated 5-Fold CV (Averaged)"
   }
@@ -485,10 +497,9 @@ svr_ho_pipeline <- function(outdir,
   
   save.image(file_to_save)
   
-  message("Pipeline completed successfully!")
+  message(sprintf("Pipeline completed successfully for '%s' using [%s]!", sp_name, val_scheme_str))
   invisible(NULL)
 }
-
 
 # ==============================================================================
 # CONFIGURACIÓN GENERAL DE RUTAS Y PARÁMETROS
@@ -497,194 +508,78 @@ out_dir    <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics"
 r_dir      <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s"
 d_path     <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx"
 sdm_base   <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval"
-
-# ==============================================================================
-# 1. Crocodylus acutus
-# ==============================================================================
+# =============================================================================
+# 1. DEFINICIÓN DE RUTAS BASE
+# =============================================================================
 sdm_ca <- file.path(sdm_base, "Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif")
+sdm_cm <- file.path(sdm_base, "Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif")
 
-CA_E1 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CA_CELLS_NO_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus acutus",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = F,   # Spatial Block CV (o LOOCV si N < 100)
-  use_loocv            = TRUE,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = TRUE
+# Mapas de información por especie y tipo de validación cruzada
+species_info <- list(
+  CA = list(name = "Crocodylus acutus", sdm = sdm_ca),
+  CM = list(name = "Crocodylus moreletii", sdm = sdm_cm)
 )
 
-CA_E2 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CA_CELLS_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus acutus",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = TRUE,   # Incluye Lon/Lat
-  use_blockcv          = F,
-  use_loocv            = F,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = TRUE
+cv_configs <- list(
+  LOOCV   = list(use_loocv = TRUE,  use_blockcv = FALSE),
+  BLOCKCV = list(use_loocv = FALSE, use_blockcv = TRUE),
+  KFOLD   = list(use_loocv = FALSE, use_blockcv = FALSE) # Ajusta banderas si KFOLD requiere otra op.
 )
 
-CA_E3 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CA_COORDS_NO_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus acutus",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = F,
-  use_loocv            = TRUE,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = FALSE  # Puntos sin resumir por pixel
+# =============================================================================
+# 2. GENERACIÓN DE LA GRILLA DE ESCENARIOS
+# =============================================================================
+scenarios_grid <- expand.grid(
+  sp_code              = c("CA", "CM"),
+  aggregate_occs_cells = c(TRUE, FALSE),
+  addLonLat            = c(TRUE, FALSE),
+  cv_type              = c("LOOCV", "BLOCKCV", "KFOLD"),
+  stringsAsFactors     = FALSE
 )
 
-CA_E4 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CA_COORDS_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus acutus",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = F,  # Desactiva bloques espaciales
-  use_loocv            = TRUE,   # LOOCV convencional
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = F
-)
+cat("Total de escenarios a ejecutar:", nrow(scenarios_grid), "\n")
 
+# =============================================================================
+# 3. EJECUCIÓN AUTOMATIZADA
+# =============================================================================
+results <- list()
 
-# ==============================================================================
-# 1. Crocodylus moreletti
-# ==============================================================================
-sdm_ca <- file.path(sdm_base, "Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif")
-#LOOCV
-CM_E1 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_CELLS_NO_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = F,   # Spatial Block CV (o LOOCV si N < 100)
-  use_loocv            = TRUE,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = TRUE
-)
+for (i in 1:nrow(scenarios_grid)) {
+  
+  row <- scenarios_grid[i, ]
+  
+  # Extraer configuración de especie y validación cruzada
+  sp_data <- species_info[[row$sp_code]]
+  cv_data <- cv_configs[[row$cv_type]]
+  
+  # Construir sufijos dinámicos para el directorio
+  cell_tag <- if (isTRUE(row$aggregate_occs_cells)) "CELLS" else "POINTS"
+  ll_tag   <- if (isTRUE(row$addLonLat)) "WITH_LONLAT" else "NO_LONLAT"
+  cv_tag   <- row$cv_type
+  
+  # Crear nombre único de carpeta de salida
+  folder_name <- paste(row$sp_code, cell_tag, ll_tag, cv_tag, sep = "_")
+  outdir_path <- file.path(out_dir, folder_name)
+  
+  cat(sprintf("\n------------------------------------------------------------\n"))
+  cat(sprintf("[%d/%d] Ejecutando: %s\n", i, nrow(scenarios_grid), folder_name))
+  cat(sprintf("------------------------------------------------------------\n"))
+  
+  # Llamada a la función del pipeline
+  results[[folder_name]] <- svr_ho_pipeline(
+    outdir               = outdir_path,
+    sp_name              = sp_data$name,
+    raster_dir           = r_dir,
+    data_path            = d_path,
+    sdm_path             = sp_data$sdm,
+    n_cores              = 8,
+    cor_cutoff           = 0.5,
+    addLonLat            = row$addLonLat,
+    use_blockcv          = cv_data$use_blockcv,
+    use_loocv            = cv_data$use_loocv,
+    kernel_type          = "svmRadial",
+    aggregate_occs_cells = row$aggregate_occs_cells
+  )
+}
 
-CM_E2 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_CELLS_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = TRUE,   # Incluye Lon/Lat
-  use_blockcv          = F,
-  use_loocv            = TRUE,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = TRUE
-)
-
-CM_E3 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_COORDS_NO_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = F,
-  use_loocv            = TRUE,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = FALSE  # Puntos sin resumir por pixel
-)
-
-CM_E4 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_COORDS_LONLAT_LOOCV"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = F,  # Desactiva bloques espaciales
-  use_loocv            = TRUE,   # LOOCV convencional
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = F
-)
-#SPATIAL BLOCK
-CM_E5 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_CELLS_NO_LONLAT_SPBLOCK"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = T,   # Spatial Block CV (o LOOCV si N < 100)
-  use_loocv            = F,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = TRUE
-)
-
-CM_E6 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_CELLS_LONLAT_SPBLOCK"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = TRUE,   # Incluye Lon/Lat
-  use_blockcv          = T,   # Spatial Block CV (o LOOCV si N < 100)
-  use_loocv            = F,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = TRUE
-)
-
-CM_E7 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_COORDS_NO_LONLAT_SPBLOCK"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = T,   # Spatial Block CV (o LOOCV si N < 100)
-  use_loocv            = F,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = FALSE  # Puntos sin resumir por pixel
-)
-
-CM_E8 <- svr_ho_pipeline(
-  outdir               = paste0(out_dir,"/","CM_COORDS_LONLAT_SPBLOCK"),
-  sp_name              = "Crocodylus moreletti",
-  raster_dir           = r_dir,
-  data_path            = d_path,
-  sdm_path             = sdm_ca,
-  n_cores              = 8,
-  cor_cutoff           = 0.5,
-  addLonLat            = FALSE,
-  use_blockcv          = T,   # Spatial Block CV (o LOOCV si N < 100)
-  use_loocv            = F,
-  kernel_type          = "svmRadial",
-  aggregate_occs_cells = F
-)
+cat("\n¡Procesamiento finalizado exitosamente para todos los escenarios!\n")
