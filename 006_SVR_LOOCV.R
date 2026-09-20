@@ -198,7 +198,7 @@ svr_ho_pipeline <- function(outdir,
   # ------------------------------------------------------------------------------
   # 4. SVR MODEL TRAINING
   # ------------------------------------------------------------------------------
-  weights_vec    <- data_sel_model$n_samples_in_cell
+  weights_vec    <- log(data_sel_model$n_samples_in_cell + 1)
   data_sel_model <- data_sel_model %>% dplyr::select(-n_samples_in_cell)
   
   cl <- makeCluster(n_cores)
@@ -226,8 +226,10 @@ svr_ho_pipeline <- function(outdir,
   
   if (kernel_type == "svmRadial") {
     svm_grid <- expand.grid(
-      sigma = c(0.001, 0.01, 0.05, 0.1, 0.5),
-      C     = c(0.1, 1, 5, 10, 50, 100)
+      # Valores bajos/medios de sigma aseguran gradientes ambientales suaves
+      sigma = c(0.0005, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1),
+      # Regularización moderada para evitar que C > 50 memorice los datos de entrenamiento
+      C     = c(0.05, 0.1, 0.5, 1, 2, 5, 10, 20)
     )
     final_svr <- caret::train(
       Ho ~ .,
@@ -241,7 +243,8 @@ svr_ho_pipeline <- function(outdir,
     )
   } else {
     svm_grid <- expand.grid(
-      C = 10^seq(-3, 2, length.out = 25)
+      # Búsqueda logarítmica de 30 puntos en el rango [10^-3, 10^2]
+      C = 10^seq(-3, 2, length.out = 30)
     )
     final_svr <- caret::train(
       Ho ~ .,
@@ -440,7 +443,7 @@ CA <- svr_ho_pipeline(
   cor_cutoff  = 0.5,
   addLonLat   = TRUE,
   use_loocv   = TRUE,
-  kernel_type = "svmRadial"
+  kernel_type = "svmLinear"
 )
 
 # Bioclimatic variables only + LOOCV
@@ -454,7 +457,7 @@ CA2 <- svr_ho_pipeline(
   cor_cutoff  = 0.5,
   addLonLat   = FALSE,
   use_loocv   = TRUE,
-  kernel_type = "svmRadial"
+  kernel_type = "svmLinear"
 )
 
 
@@ -489,7 +492,7 @@ CM <- svr_ho_pipeline(
   cor_cutoff  = 0.5,
   addLonLat   = TRUE,
   use_loocv   = FALSE,
-  kernel_type = "svmRadial" # Recomended over svmLinear for non-linear response
+  kernel_type = "svmLinear" # Recomended over svmLinear for non-linear response
 )
 
 # Bioclimatic variables only + Repeated 5-Fold CV
@@ -503,5 +506,5 @@ CM2 <- svr_ho_pipeline(
   cor_cutoff  = 0.5,
   addLonLat   = FALSE,
   use_loocv   = FALSE,
-  kernel_type = "svmRadial"
+  kernel_type = "svmLinear"
 )
