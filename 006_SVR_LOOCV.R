@@ -100,7 +100,8 @@ svr_ho_pipeline <- function(outdir,
   }
   
   data <- readxl::read_xlsx(data_path, sheet = "data") %>%
-    dplyr::filter(sp == sp_name, !is.na(Ho), !is.na(lat), !is.na(lon))
+    dplyr::filter(sp == sp_name, !is.na(Ho), Ho > 0, !is.na(lat), !is.na(lon)
+    )
   
   my_sf_object <- sf::st_as_sf(data, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
   points_vect  <- terra::vect(my_sf_object)
