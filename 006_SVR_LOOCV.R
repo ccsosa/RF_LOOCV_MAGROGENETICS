@@ -199,13 +199,19 @@ svr_ho_pipeline <- function(outdir,
         progress = FALSE
       )
       
-      train_indices <- lapply(sb$folds, function(f) f$train)
-      test_indices  <- lapply(sb$folds, function(f) f$test)
+      train_index <- lapply(sb$folds_list, function(fold) fold[[1]])
+      test_index <- lapply(sb$folds_list, function(fold) fold[[2]])
+      
+      names(train_index) <- paste0("Fold", seq_along(train_index))
+      names(test_index) <- names(train_index)
+      
       
       train_ctrl <- caret::trainControl(
         method = "cv",
-        index = train_indices,
-        indexOut = test_indices,
+        number = length(train_index),
+        index = train_index,
+        search = "random",
+        indexOut = test_index,
         savePredictions = "final",
         allowParallel = TRUE
       )
@@ -544,7 +550,7 @@ cat("Total de escenarios a ejecutar:", nrow(scenarios_grid), "\n")
 # =============================================================================
 results <- list()
 
-for (i in 1:nrow(scenarios_grid)) {
+for (i in 9:nrow(scenarios_grid)) {
   
   row <- scenarios_grid[i, ]
   
@@ -556,6 +562,7 @@ for (i in 1:nrow(scenarios_grid)) {
   cell_tag <- if (isTRUE(row$aggregate_occs_cells)) "CELLS" else "POINTS"
   ll_tag   <- if (isTRUE(row$addLonLat)) "WITH_LONLAT" else "NO_LONLAT"
   cv_tag   <- row$cv_type
+  
   
   # Crear nombre único de carpeta de salida
   folder_name <- paste(row$sp_code, cell_tag, ll_tag, cv_tag, sep = "_")
@@ -580,6 +587,8 @@ for (i in 1:nrow(scenarios_grid)) {
     kernel_type          = "svmRadial",
     aggregate_occs_cells = row$aggregate_occs_cells
   )
+  tmpFiles(current=TRUE, orphan=TRUE, old=TRUE, remove=TRUE)
+  
 }
 
 cat("\n¡Procesamiento finalizado exitosamente para todos los escenarios!\n")
