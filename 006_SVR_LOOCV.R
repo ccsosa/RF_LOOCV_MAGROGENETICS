@@ -7,18 +7,6 @@
 #' Support Vector Regression (SVR), cross-validation, extrapolation filtering via Multivariate 
 #' Environmental Similarity Surface (MESS), and automated cartographic generation.
 #'
-#' @details
-#' The pipeline performs the following sequential steps:
-#' \enumerate{
-#'   \item \strong{Data Loading & Spatial Alignment:} Reads bioclimatic rasters and genetic sample records, aligning off-coverage coordinates to the nearest valid raster grid cell.
-#'   \item \strong{Grid Aggregation:} Aggregates genetic sampling points located within the same raster cell, computing mean observed heterozygosity (\emph{Ho}) and sample weights.
-#'   \item \strong{Feature Selection:} Removes collinear predictors using a absolute correlation cutoff (\code{cor_cutoff}) applied to bioclimatic variables.
-#'   \item \strong{Model Training & Tuning:} Fits an SVR model (\code{svmRadial} or \code{svmLinear}) via \code{caret::train} using sample counts as fitting weights, optimized over a hyperparameter grid.
-#'   \item \strong{Cross-Validation:} Evaluates generalization performance using either Leave-One-Out Cross-Validation (LOOCV) or Repeated $K$-Fold CV ($5 \times 10$).
-#'   \item \strong{Raster Prediction & MESS Masking:} Predicts \emph{Ho} across the target species distribution area (SDM) in memory-safe chunks and masks non-analogous environmental regions ($MESS \le 0$).
-#'   \item \strong{Export:} Writes clean datasets, model performance metrics, scatterplots, spatial prediction rasters (\code{.tif}), thematic maps (\code{.pdf}), and complete workspace states (\code{.RData}).
-#' }
-#'
 #' @param outdir \code{character}. Output directory path where all metrics, figures, rasters, and workspace files will be saved.
 #' @param sp_name \code{character}. Exact target species name used to filter records in the input Excel dataset.
 #' @param raster_dir \code{character}. Directory path containing individual predictor raster layers in \code{.tif} format. Must include \code{"lon.tif"} and \code{"lat.tif"}.
@@ -30,46 +18,24 @@
 #' @param use_loocv \code{logical}. Cross-validation scheme controller. If \code{TRUE}, executes Leave-One-Out Cross-Validation (LOOCV). If \code{FALSE}, runs a 5-fold CV repeated 10 times. Default is \code{FALSE}.
 #' @param kernel_type \code{character}. Support Vector Machine kernel specification passed to \code{caret}. Supported options are \code{"svmRadial"} (Radial Basis Function / RBF) and \code{"svmLinear"}. Default is \code{"svmRadial"}.
 #'
-#' @return Invisibly returns \code{NULL}. All outputs (metrics CSVs, figures, GeoTIFFs, PDF maps, and \code{.RData} environments) are written to \code{outdir}.
-#'
-#' @author Jorge (Tesis Macrogenética)
-#' @keywords spatial-prediction macrogenetics SVR caret terra tmap
-#'
-#' @examples
-#' \dontrun{
-#' # Run pipeline using RBF Kernel with Repeated Cross-Validation
-#' svr_ho_pipeline(
-#'   outdir      = "C:/Research/Output",
-#'   sp_name     = "Crocodylus moreletii",
-#'   raster_dir  = "C:/Research/Rasters",
-#'   data_path   = "C:/Research/Data/Genetic_Data.xlsx",
-#'   sdm_path    = "C:/Research/SDM/C_moreletii_P10.tif",
-#'   n_cores     = 8L,
-#'   cor_cutoff  = 0.5,
-#'   addLonLat   = FALSE,
-#'   use_loocv   = FALSE,
-#'   kernel_type = "svmLinear"
-#' )
-#' }
+#' @return Invisibly returns \code{NULL}.
 #' @export
-# ==============================================================================
-# REQUIRED LIBRARIES / SCRIPT DEPENDENCIES
-# ==============================================================================
-library(dplyr)        # Data manipulation and %>% pipe operators
-library(readxl)       # Reading Excel files (.xlsx)
-library(sf)           # Handling spatial vector data
-library(terra)        # High-performance spatial raster operations and processing
-library(caret)        # SVR model training, tuneGrid, and feature selection
-library(doParallel)   # Parallel processing execution
-library(kernlab)      # Backend engine executing 'svmLinear' in caret
-library(yardstick)    # Model performance metrics calculation (RMSE, MAE, R2)
-library(ggplot2)      # Data visualization and plotting
-library(ggpmisc)      # Annotating equations and R2 in plots (stat_poly_eq)
-library(patchwork)    # Combining multiple plots (p_train + p_test)
-library(raster)       # Converting 'terra' objects to 'raster' for dismo support
-library(dismo)        # MESS (Multivariate Environmental Similarity Surface) masking
-library(RColorBrewer) # Color palettes for spatial maps
-library(tmap)         # Thematic map generation and export
+
+library(dplyr)
+library(readxl)
+library(sf)
+library(terra)
+library(caret)
+library(doParallel)
+library(kernlab)
+library(yardstick)
+library(ggplot2)
+library(ggpmisc)
+library(patchwork)
+library(raster)
+library(dismo)
+library(RColorBrewer)
+library(tmap)
 
 svr_ho_pipeline <- function(outdir, 
                             sp_name, 
@@ -101,7 +67,6 @@ svr_ho_pipeline <- function(outdir,
     stop("Error: 'lon' and/or 'lat' layers are missing from the raster directory.")
   }
   
-  # Filtrado básico: solo valores validos y Ho > 0
   data <- readxl::read_xlsx(data_path, sheet = "data") %>%
     dplyr::filter(sp == sp_name, !is.na(Ho), Ho > 0, !is.na(lat), !is.na(lon))
   
@@ -133,7 +98,6 @@ svr_ho_pipeline <- function(outdir,
   my_sf_object$cell_lat <- coords_cells[, 2]
   my_sf_object          <- my_sf_object[!is.na(my_sf_object$cell_id), ]
   
-  # Agregación por celda (sin filtro por n)
   data_aggregated_sf <- my_sf_object %>%
     dplyr::group_by(cell_id) %>%
     dplyr::summarise(
@@ -226,9 +190,7 @@ svr_ho_pipeline <- function(outdir,
   
   if (kernel_type == "svmRadial") {
     svm_grid <- expand.grid(
-      # Valores bajos/medios de sigma aseguran gradientes ambientales suaves
       sigma = c(0.0005, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1),
-      # Regularización moderada para evitar que C > 50 memorice los datos de entrenamiento
       C     = c(0.05, 0.1, 0.5, 1, 2, 5, 10, 20)
     )
     final_svr <- caret::train(
@@ -243,7 +205,6 @@ svr_ho_pipeline <- function(outdir,
     )
   } else {
     svm_grid <- expand.grid(
-      # Búsqueda logarítmica de 30 puntos en el rango [10^-3, 10^2]
       C = 10^seq(-3, 2, length.out = 30)
     )
     final_svr <- caret::train(
@@ -262,11 +223,12 @@ svr_ho_pipeline <- function(outdir,
   registerDoSEQ()
   
   # ------------------------------------------------------------------------------
-  # 5. MODEL METRICS & PREDICTION CONSOLIDATION
+  # 5. MODEL METRICS & PREDICTION CONSOLIDATION (CORREGIDO)
   # ------------------------------------------------------------------------------
-  # Entrenamiento
+  # A) PREDICCIONES DE ENTRENAMIENTO (TRAIN FIT REAL)
   train_pred_vals <- predict(final_svr, newdata = data_sel_model)
   train_df <- data.frame(
+    rowIndex  = 1:nrow(data_sel_model),
     Observed  = data_sel_model$Ho,
     Predicted = train_pred_vals
   )
@@ -275,25 +237,30 @@ svr_ho_pipeline <- function(outdir,
   train_mae  <- yardstick::mae_vec(train_df$Observed, train_df$Predicted)
   train_rsq  <- yardstick::rsq_vec(train_df$Observed, train_df$Predicted)
   
-  # Filtrar por el hiperparámetro óptimo
+  # B) PREDICCIONES OUT-OF-FOLD (VALIDACIÓN CV REAL)
+  # Filtrar estrictamente por los hiperparámetros ganadores (bestTune)
   if (kernel_type == "svmRadial") {
+    best_sig <- final_svr$bestTune$sigma
+    best_c   <- final_svr$bestTune$C
     cv_preds_raw <- final_svr$pred %>%
-      dplyr::filter(sigma == final_svr$bestTune$sigma, C == final_svr$bestTune$C)
+      dplyr::filter(abs(sigma - best_sig) < 1e-7, abs(C - best_c) < 1e-7)
   } else {
+    best_c   <- final_svr$bestTune$C
     cv_preds_raw <- final_svr$pred %>%
-      dplyr::filter(C == final_svr$bestTune$C)
+      dplyr::filter(abs(C - best_c) < 1e-7)
   }
   
-  # PROMEDIADO OUT-OF-FOLD (Elimina columnas verticales en las 10 repeticiones)
+  # Promediar las predicciones Out-Of-Fold por cada celda (rowIndex)
   cv_df <- cv_preds_raw %>%
     dplyr::group_by(rowIndex) %>%
     dplyr::summarise(
       Observed  = mean(obs, na.rm = TRUE),
       Predicted = mean(pred, na.rm = TRUE),
       .groups   = "drop"
-    )
+    ) %>%
+    dplyr::arrange(rowIndex)
   
-  # Métricas de validación reales sobre datos promediados
+  # Métricas de validación reales
   test_rmse <- yardstick::rmse_vec(cv_df$Observed, cv_df$Predicted)
   test_mae  <- yardstick::mae_vec(cv_df$Observed, cv_df$Predicted)
   test_rsq  <- yardstick::rsq_vec(cv_df$Observed, cv_df$Predicted)
@@ -308,15 +275,15 @@ svr_ho_pipeline <- function(outdir,
   write.csv(metrics_out, file.path(outdir, paste0(sp_name, "_SVM_Metrics", suffix, ".csv")), row.names = FALSE)
   
   # ------------------------------------------------------------------------------
-  # 6. EVALUATIVE PLOTS
+  # 6. EVALUATIVE PLOTS (PANEL A Y B CORREGIDOS Y ALINEADOS)
   # ------------------------------------------------------------------------------
   p_train <- ggplot(train_df, aes(x = Observed, y = Predicted)) +
     geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
     stat_poly_line(color = "darkgreen") +
     stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
     geom_point(size = 3, alpha = 0.8, color = "darkgreen") +
-    labs(title = "A) Training",
-         subtitle = paste("n =", n_samples, "cells"),
+    labs(title = "A) Training Fit",
+         subtitle = paste("n =", n_samples, "cells (Resubstitution)"),
          x = "Observed Ho", y = "Predicted Ho") +
     theme_bw(13)
   
@@ -325,7 +292,7 @@ svr_ho_pipeline <- function(outdir,
     stat_poly_line(color = "blue") +
     stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
     geom_point(size = 3, alpha = 0.8, color = "blue") +
-    labs(title = "B) Validation (Test)",
+    labs(title = "B) Cross-Validation (Test)",
          subtitle = ifelse(use_loocv, "Leave-One-Out CV", "Repeated 5-Fold CV (Averaged)"),
          x = "Observed Ho", y = "Predicted Ho") +
     theme_bw(13)
@@ -428,7 +395,6 @@ svr_ho_pipeline <- function(outdir,
 }
 
 
-
 # ------------------------------------------------------------------------------
 # Crocodylus acutus
 # ------------------------------------------------------------------------------
@@ -492,7 +458,7 @@ CM <- svr_ho_pipeline(
   cor_cutoff  = 0.5,
   addLonLat   = TRUE,
   use_loocv   = FALSE,
-  kernel_type = "svmLinear" # Recomended over svmLinear for non-linear response
+  kernel_type = "svmRadial" # Recomended over svmLinear for non-linear response
 )
 
 # Bioclimatic variables only + Repeated 5-Fold CV
@@ -506,5 +472,5 @@ CM2 <- svr_ho_pipeline(
   cor_cutoff  = 0.5,
   addLonLat   = FALSE,
   use_loocv   = FALSE,
-  kernel_type = "svmLinear"
+  kernel_type = "svmRadial"
 )
