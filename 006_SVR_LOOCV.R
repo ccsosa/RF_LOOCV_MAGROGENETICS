@@ -163,6 +163,17 @@ svr_ho_pipeline <- function(outdir,
   } else {
     stop("Less than 30 grids ... LOOCV can fail")
   }
+  
+  
+  if(isTRUE(addLonLat)){
+    write.csv(data_sel_model, file.path(outdir, paste0(sp_name, "data_clean_SVM_LONLAT.csv")), row.names = FALSE)  
+    message(predictors_list)  
+  } else {
+    write.csv(data_sel_model, file.path(outdir, paste0(sp_name, "data_clean_SVM.csv")), row.names = FALSE)  
+    message(predictors_list)
+  }
+  
+  
   # ------------------------------------------------------------------------------
   # 4. LINEAR SVR MODEL TRAINING WITH LOOCV
   # ------------------------------------------------------------------------------
@@ -184,6 +195,7 @@ svr_ho_pipeline <- function(outdir,
   )
   
   set.seed(123)
+  
   final_svr <- caret::train(
     Ho ~ .,
     data       = data_sel_model,
@@ -403,7 +415,7 @@ CA <- svr_ho_pipeline(
   raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif",
-  n_cores    = 8,
+  n_cores    = 12,
   cor_cutoff = 0.6,
   addLonLat = T
 )
@@ -419,15 +431,17 @@ CA2 <- svr_ho_pipeline(
   addLonLat = F
 )
 
-# Executive execution for Crocodylus intermedius
-CI <- svr_ho_pipeline(
-  outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
-  sp_name    = "Crocodylus intermedius",
-  raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
-  data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
-  sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_intermedius/Crocodylus_intermedius_Binario_P10.tif",
-  n_cores    = 8
-)
+# # Executive execution for Crocodylus intermedius
+# CI <- svr_ho_pipeline(
+#   outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
+#   sp_name    = "Crocodylus intermedius",
+#   raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
+#   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
+#   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_intermedius/Crocodylus_intermedius_Binario_P10.tif",
+#   n_cores    = 8,
+#   cor_cutoff = 0.6,
+#   addLonLat = F
+# )
 
 # Executive execution for Crocodylus moreletii
 CM <- svr_ho_pipeline(
@@ -436,5 +450,17 @@ CM <- svr_ho_pipeline(
   raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
-  n_cores    = 8
-)
+  n_cores    = 8,
+  cor_cutoff = 0.6,
+  addLonLat = T
+  )
+
+CM2 <- svr_ho_pipeline(
+  outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
+  sp_name    = "Crocodylus moreletii",
+  raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
+  data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
+  sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
+  n_cores    = 8,
+  cor_cutoff = 0.6,
+  addLonLa
