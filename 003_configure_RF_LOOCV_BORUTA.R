@@ -35,9 +35,9 @@ sdm_path <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodyl
 # number of cores used by ranger
 N_CORES <- 6L  # modifiable parameter, never detectCores()-1
 # Boruta consensus threshold (out of n_seeds runs)
-boruta_threshold <- 10   # change to 8L if you'd rather require 8/10 instead of full consensus
+boruta_threshold <- 30   # change to 8L if you'd rather require 8/10 instead of full consensus
 # number of random seeds used to assess Boruta stability
-n_seeds <- 10
+n_seeds <- 30
 
 #' Nested LOOCV Random Forest workflow for spatial prediction of Ho
 #'
@@ -114,35 +114,50 @@ n_seeds <- 10
 #' @return Invisibly nothing; called for its side effects (files written to
 #'   \code{outdir} and an .RData workspace image saved at the end).
 #'   
-RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta_threshold,n_seeds){
-  # ------------------------------------------------------------------------------
-  # 1. LOADING AND PREPROCESSING OF RASTER LAYERS AND DATA
-  # ------------------------------------------------------------------------------
-  #use species name:
+################################################################################
+# MACROGENETICS PREDICTION WORKFLOW (RANDOM FOREST VIA RANGER)
+# Continuous geographic prediction of heterozygosity (Ho) over a raster.
+################################################################################
+
+suppressPackageStartupMessages({
+  library(terra)
+  library(sf)
+  library(ranger)
+  library(patchwork)
+  library(dplyr)
+  library(ggplot2)
+  library(ggpmisc)
+  library(tmap)
+  library(Boruta)
+  library(ape)
+  library(RColorBrewer)
+  library(readxl)
+  library(caret)
+  library(dismo)
+  library(raster)
+})
+
+RF_LOOCV <- function(outdir, sp_name, raster_dir, data_path, sdm_path, N_CORES = 6L, boruta_threshold = 30, n_seeds = 30) {
   
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
   
+  # ------------------------------------------------------------------------------
+  # 1. RASTER LAYERS AND DATA LOADING & PREPROCESSING
+  # ------------------------------------------------------------------------------
   bios_files <- list.files(raster_dir, pattern = "\\.tif$", full.names = TRUE)
   bios_names <- sub("\\.tif$", "", list.files(raster_dir, pattern = "\\.tif$"))
   
   bios <- terra::rast(bios_files)
   names(bios) <- bios_names
   
-  # Remove redundant layers (WorldClim)
-  # layers_to_remove <- c("wc2.1_30s_bio_15", "wc2.1_30s_bio_4")
-  # bios <- bios[[!names(bios) %in% layers_to_remove]]
+  data <- readxl::read_xlsx(data_path, sheet = "data") %>% 
+    dplyr::filter(sp == sp_name, !is.na(Ho), !is.na(lat), !is.na(lon))
   
-  # Load and filter genetic data
-  data <- readxl::read_xlsx(data_path, sheet = "data")
-  data <- data %>% 
-    dplyr::filter(sp == sp_name, !is.na(Ho))
-  #remove empty coords
-  data <- data[which(!is.na(data$lat)),]
-  # Build the initial sf point object
   my_sf_object <- sf::st_as_sf(data, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
   puntos_vect  <- terra::vect(my_sf_object)
   
   # ------------------------------------------------------------------------------
-  # 2. ASSIGNMENT TO THE NEAREST CELL AND SPATIAL AGGREGATION PER CELL
+  # 2. NEAREST CELL ASSIGNMENT AND SPATIAL AGGREGATION PER CELL
   # ------------------------------------------------------------------------------
   cell_ids <- terra::cells(bios[[1]], puntos_vect)[, "cell"]
   na_cells <- which(is.na(cell_ids))
@@ -166,7 +181,6 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
   my_sf_object$cell_lat <- coords_cells[, 2]
   my_sf_object          <- my_sf_object[!is.na(my_sf_object$cell_id), ]
   
-  # Aggregate points falling within the same cell
   data_aggregated_sf <- my_sf_object %>%
     dplyr::group_by(cell_id) %>%
     dplyr::summarise(
@@ -177,18 +191,15 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
       .groups = "drop"
     )
   
-  # Extract environmental values using a focal filter to avoid marine edges/NAs
   bios_focal <- terra::focal(bios, w = 15, fun = mean, na.policy = "only", na.rm = TRUE)
   gc()
   
   puntos_unicos_vect <- terra::vect(data_aggregated_sf)
   ext_direct <- terra::extract(bios_focal, puntos_unicos_vect)
   
-  # Fallback extraction for coastal points still returning NA
   if (any(!complete.cases(ext_direct))) {
-    message("Coastal points with NA detected. Extracting from the nearest coastal pixel...")
+    message("Coastal points with NAs detected. Extracting from the nearest coastal pixel...")
     na_rows <- which(!complete.cases(ext_direct))
-    
     for (i in na_rows) {
       ext_nearest <- terra::extract(bios_focal, puntos_unicos_vect[i, ], nearest = TRUE)
       ext_direct[i, names(bios)] <- ext_nearest[, names(bios)]
@@ -201,10 +212,10 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
     dplyr::select(-ID)
   
   data_aggregated_sf_sp <- cbind(data_aggregated_sf, ext_direct_clean)
-  data_aggregated_sf    <- sf::st_drop_geometry(data_aggregated_sf_sp)
-  rm(ext_direct_clean);gc()
+  rm(ext_direct_clean); gc()
+  
   # ------------------------------------------------------------------------------
-  # 3. VARIABLE SELECTION — data preparation
+  # 3. VARIABLE SELECTION AND DECOLLINEARIZATION
   # ------------------------------------------------------------------------------
   data_sel <- data_aggregated_sf_sp %>%
     dplyr::select(Ho, n_samples_in_cell, lon, lat, dplyr::all_of(names(bios))) %>%
@@ -214,44 +225,18 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
   data_sel   <- data_sel[valid_rows, ]
   data_aggregated_sf_sp_sel <- data_aggregated_sf_sp[valid_rows, ]
   
-  n_samples <- nrow(data_sel)
+  n_samples  <- nrow(data_sel)
+  cor_matrix <- cor(data_sel[, names(bios)])
+  to_remove  <- caret::findCorrelation(cor_matrix, cutoff = 0.6)
   
-  #-------------------------------------------------------------------------------
-  # 1. Convert sampling coordinates to a terra SpatVector (EPSG:4326 / WGS84)
-  crs_planar <- "+proj=aea +lat_1=19 +lat_2=-41 +lat_0=-11 +lon_0=-76 +datum=WGS84 +units=m"
+  vars <- if (length(to_remove) > 0) colnames(cor_matrix)[-to_remove] else colnames(cor_matrix)
   
-  coords_matrix <- cbind(
-    lon = as.numeric(data_aggregated_sf_sp_sel$lon),
-    lat = as.numeric(data_aggregated_sf_sp_sel$lat)
-  )
-  sample_pts <- terra::vect(coords_matrix, type = "points", crs = "EPSG:4326")
-  feat_lines <- terra::rasterize(sample_pts, bios[[1]], touches = TRUE)
-  feat_lines_planar <- terra::project(feat_lines, crs_planar, method = "near")
+  data_sel <- data_sel[c("Ho", "n_samples_in_cell", vars)]
+  data_aggregated_sf_sp_sel <- data_aggregated_sf_sp_sel[, c("Ho", "n_samples_in_cell", vars)]
   
-  x_dist_planar <- terra::distance(feat_lines_planar, unit = "km")
-  # plot(x_dist_planar)
-  
-  x_dist <- terra::project(x_dist_planar, bios[[1]])
-  # x_dist <- terra::mask(x_dist, bios[[1]])
-  names(x_dist) <- "dist_points"
-  ext_dist <- terra::extract(x_dist, sample_pts,nearest = TRUE)
-  x_dist <- terra::mask(x_dist, bios[[1]])
-  writeRaster(x_dist,file.path(outdir, paste0(sp_name,"_","DIST.tif")),overwrite=T)
-  rm(x_dist_planar,feat_lines_planar,sample_pts,coords_matrix);gc()
-  
-  data_sel$dist_points <- as.numeric(ext_dist[,2])
-  data_aggregated_sf_sp_sel$dist_points <- as.numeric(ext_dist[,2])
-  bios <- c(bios,x_dist)
   # ------------------------------------------------------------------------------
-  # 3b + 4-5. NESTED LOOCV: BORUTA AND HYPERPARAMETERS ARE REDONE PER FOLD
-  # (Previously, Boruta was run only once on the full set of cells, which
-  # leaked information from each test cell into variable selection. Now, in
-  # every fold, Boruta and the grid search use ONLY the n-1 training rows —
-  # no leakage.)
+  # HELPER FUNCTIONS FOR NESTED LOOCV
   # ------------------------------------------------------------------------------
-  
-  # Helper function: runs Boruta with n_seeds random seeds on ANY training
-  # subset and returns the variables that pass the consensus threshold.
   run_boruta_selection <- function(train_data, all_vars, threshold, n_seeds) {
     formula_full <- as.formula(paste("Ho ~", paste(all_vars, collapse = " + ")))
     resultados <- vector("list", n_seeds)
@@ -272,25 +257,23 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
       dplyr::arrange(desc(n_confirmed))
     
     vars_sel <- resumen$variable[resumen$n_confirmed >= threshold]
-    if (length(vars_sel) == 0) vars_sel <- all_vars  # fallback: use all variables
+    if (length(vars_sel) == 0) vars_sel <- all_vars
     vars_sel
   }
   
-  # Helper function: grid search over ANY data subset and ANY variable set,
-  # returns the best hyperparameters according to that subset's OOB R2.
   run_grid_search <- function(train_data, vars_sel) {
     formula_opt <- as.formula(paste("Ho ~", paste(vars_sel, collapse = " + ")))
     n_tr <- nrow(train_data)
-    max_node <- min(20, max(1, floor(n_tr / 5)))
-    mtry_vals <- unique(pmax(1, pmin(
-      length(vars_sel),
-      c(2, floor(sqrt(length(vars_sel))), floor(length(vars_sel) / 2))
-    )))
+    
+    # Dynamic adjustment of min.node.size and mtry
+    min_nodes <- unique(pmax(1, floor(c(n_tr * 0.10, n_tr * 0.20, n_tr * 0.30))))
+    mtry_max  <- length(vars_sel)
+    mtry_vals <- unique(pmax(1, pmin(mtry_max, c(2, floor(sqrt(mtry_max)), floor(mtry_max / 2)))))
     
     tuning_grid <- expand.grid(
-      num.trees = c(500, 1000, 2000, 5000, 10000),
+      num.trees = c(500, 1000, 1500),
       mtry = mtry_vals,
-      min.node.size = unique(c(1, 3, 5, 8, max_node))
+      min.node.size = min_nodes
     )
     
     res <- vector("list", nrow(tuning_grid))
@@ -298,7 +281,7 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
       fit <- ranger::ranger(
         formula = formula_opt,
         data = train_data,
-        case.weights = train_data$n_samples_in_cell,
+        case.weights = sqrt(train_data$n_samples_in_cell),
         num.trees = tuning_grid$num.trees[g],
         mtry = tuning_grid$mtry[g],
         min.node.size = tuning_grid$min.node.size[g],
@@ -319,17 +302,19 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
     tuning_df[order(tuning_df$OOB_R2, decreasing = TRUE), ][1, ]
   }
   
-  # --- Nested LOOCV: both Boruta and the grid search are redone in every fold ---
+  # ------------------------------------------------------------------------------
+  # 4. NESTED LOOCV
+  # ------------------------------------------------------------------------------
   loocv_preds  <- numeric(n_samples)
   loocv_params <- vector("list", n_samples)
-  loocv_vars   <- vector("list", n_samples)  # to inspect variable stability across folds
+  loocv_vars   <- vector("list", n_samples)
   
-  message("Running nested LOOCV (Boruta + grid search independently per fold)...")
+  message("Running Nested LOOCV...")
   for (i in seq_len(n_samples)) {
     train_i <- data_sel[-i, ]
     test_i  <- data_sel[i, , drop = FALSE]
     
-    vars_i <- run_boruta_selection(train_i, names(bios), boruta_threshold, n_seeds)
+    vars_i <- run_boruta_selection(train_i, vars, boruta_threshold, n_seeds)
     loocv_vars[[i]] <- data.frame(fold = i, variable = vars_i)
     
     best_params_i <- run_grid_search(train_i, vars_i)
@@ -339,52 +324,28 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
     model_i <- ranger::ranger(
       formula = formula_i,
       data = train_i,
-      case.weights = train_i$n_samples_in_cell,
+      case.weights = sqrt(train_i$n_samples_in_cell),
       num.trees = best_params_i$num.trees,
       mtry = best_params_i$mtry,
       min.node.size = best_params_i$min.node.size,
       replace = FALSE,
       seed = 100,
-      importance ="permutation",
+      importance = "permutation",
       num.threads = N_CORES
     )
     loocv_preds[i] <- predict(model_i, data = test_i)$predictions
-    
-    if (i %% 5 == 0) message(sprintf("  fold %d/%d", i, n_samples))
+    if (i %% 5 == 0) message(sprintf("  LOOCV Iteration %d/%d completed", i, n_samples))
   }
   
-  # NOTE: fixed — loocv_df must be created BEFORE any postResample() call that
-  # references it. A stray premature call to caret::postResample(loocv_df$...)
-  # used to sit here, before loocv_df existed, and crashed the function with
-  # "object 'loocv_df' not found". It has been removed; the real res_loocv
-  # computation happens further below, after loocv_df is defined.
   loocv_df <- data.frame(Observed = data_sel$Ho, Predicted = loocv_preds)
-  write.csv(loocv_df, file.path(outdir, paste0(sp_name,"_",
-                                               "LOOCV_Performance_RF_VALUES_nested.csv")), row.names = FALSE)
+  write.csv(loocv_df, file.path(outdir, paste0(sp_name, "_LOOCV_Performance_RF_VALUES_nested.csv")), row.names = FALSE)
   
-  # Stability of the variables selected in each fold
   vars_df <- do.call(rbind, loocv_vars)
-  write.csv(vars_df, file.path(outdir, paste0(sp_name,"_","LOOCV_nested_vars_por_fold.csv")), 
-            row.names = FALSE)
-  message("Variable selection frequency across folds:")
-  print(table(vars_df$variable))
+  write.csv(vars_df, file.path(outdir, paste0(sp_name, "_LOOCV_nested_vars_per_fold.csv")), row.names = FALSE)
   
-  # Stability of the hyperparameters selected in each fold
   params_df <- do.call(rbind, loocv_params)
   params_df$fold <- seq_len(n_samples)
-  write.csv(params_df, file.path(outdir, paste0(sp_name,"_","LOOCV_nested_hyperparams_por_fold.csv")), row.names = FALSE)
-  message("Hyperparameter stability across folds:")
-  print(table(params_df$num.trees, params_df$mtry))
-  
-  # Metrics (unweighted, as already defined)
-  res_loocv <- caret::postResample(loocv_df$Predicted, loocv_df$Observed)
-  sse <- sum((loocv_df$Observed - loocv_df$Predicted)^2)
-  sst <- sum((loocv_df$Observed - mean(loocv_df$Observed))^2)
-  r2_nse <- 1 - (sse / sst)
-  
-  cat(sprintf("\n--- NESTED LOOCV RESULTS (Boruta + hyperparameters) ---\nRMSE: %.4f | Pearson R2: %.4f | Nash-Sutcliffe R2 (1:1): %.4f\n",
-              res_loocv["RMSE"], res_loocv["Rsquared"], r2_nse))
-  
+  write.csv(params_df, file.path(outdir, paste0(sp_name, "_LOOCV_nested_hyperparams_per_fold.csv")), row.names = FALSE)
   
   res_loocv <- caret::postResample(loocv_df$Predicted, loocv_df$Observed)
   sse_test  <- sum((loocv_df$Observed - loocv_df$Predicted)^2)
@@ -392,23 +353,16 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
   r2_nse_test <- 1 - (sse_test / sst_test)
   
   # ------------------------------------------------------------------------------
-  # FINAL PRODUCTION MODEL (for the raster) — Boruta + tuning on the FULL dataset
+  # 5. FINAL PRODUCTION MODEL
   # ------------------------------------------------------------------------------
-  # Correct and distinct from the above: the LOOCV above already gave an
-  # honest performance estimate (no leakage). This final model, fit on all
-  # the data, is the one used to predict the raster — it is not re-validated
-  # against those same cells, so there is no leakage at this step.
-  vars_seleccionadas <- run_boruta_selection(data_sel, names(bios), boruta_threshold, n_seeds)
+  vars_seleccionadas <- run_boruta_selection(data_sel, vars, boruta_threshold, n_seeds)
   formula_rf_optimized <- as.formula(paste("Ho ~", paste(vars_seleccionadas, collapse = " + ")))
-  message(sprintf("Final model variables (all %d cells): %s",
-                  n_samples, paste(vars_seleccionadas, collapse = ", ")))
-  
   best_params <- run_grid_search(data_sel, vars_seleccionadas)
   
   best_model <- ranger::ranger(
     formula = formula_rf_optimized,
     data = data_sel,
-    case.weights = data_sel$n_samples_in_cell,
+    case.weights = sqrt(data_sel$n_samples_in_cell),
     num.trees = best_params$num.trees,
     mtry = best_params$mtry,
     min.node.size = best_params$min.node.size,
@@ -418,25 +372,7 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
     num.threads = N_CORES
   )
   
-  print(best_model)
-  
-  
-  # Validation plot
-  p_loocv <- ggplot(loocv_df, aes(x = Observed, y = Predicted)) +
-    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-    stat_poly_line(color = "blue") +
-    stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
-    geom_point(size = 3, alpha = 0.8) +
-    labs(title = "LOOCV Cross-Validation",
-         x = "Observed Heterozygosity (Ho)", 
-         y = "Predicted Heterozygosity (Ho)") +
-    theme_bw(14)
-  
-  ggsave(file.path(outdir, paste0(sp_name,"_","LOOCV_Performance_RF.png")), p_loocv, width = 7, height = 6, dpi = 300)
-  
-  # ------------------------------------------------------------------------------
-  # 6. VARIABLE IMPORTANCE
-  # ------------------------------------------------------------------------------
+  # Variable Importance
   imps <- data.frame(
     var = names(best_model$variable.importance),
     imps = best_model$variable.importance / max(best_model$variable.importance)
@@ -447,20 +383,18 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
     labs(x = "Relative Importance", y = "Ecological Predictors") +
     theme_bw(14)
   
-  ggsave(file.path(outdir, paste0(sp_name,"_","Variable_Importance_RF.png")), p_imp, width = 7, height = 5, dpi = 300)
+  ggsave(file.path(outdir, paste0(sp_name, "_Variable_Importance_RF.png")), p_imp, width = 7, height = 5, dpi = 300)
   
   # ------------------------------------------------------------------------------
-  # 7. SPATIAL PREDICTION IN CHUNKS — UNMODIFIED, EXACTLY AS ORIGINAL
+  # 6. SPATIAL PREDICTION AND MESS MASK
   # ------------------------------------------------------------------------------
-  #load sdm 
-  sdm <- terra::rast(sdm_path)
-  sdm <- sdm*1
-  sdm[which(sdm[]==0)] <- NA
+  sdm <- terra::rast(sdm_path) * 1
+  sdm[sdm == 0] <- NA
   
   bios_selected <- bios[[vars_seleccionadas]]
-  bios_selected <- terra::resample(bios_selected,sdm,"bilinear")
+  bios_selected <- terra::resample(bios_selected, sdm, method = "bilinear")
   bios_selected <- bios_selected * sdm
-  valid_cells <- terra::cells(bios_selected[[1]])
+  valid_cells   <- terra::cells(bios_selected[[1]])
   
   temp.dt <- as.data.frame(terra::extract(bios_selected, valid_cells))
   temp.dt$cell_idx <- valid_cells
@@ -470,89 +404,47 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
   temp.dt$prediction <- NA_real_
   
   chunk_size <- 50000
-  n_rows <- nrow(temp.dt)
-  n_chunks <- ceiling(n_rows / chunk_size)
+  n_rows     <- nrow(temp.dt)
+  n_chunks   <- ceiling(n_rows / chunk_size)
   
   for (i in seq_len(n_chunks)) {
-    # print(i)
     s_idx <- ((i - 1) * chunk_size) + 1
     e_idx <- min(i * chunk_size, n_rows)
     
     newdata_chunk <- temp.dt[s_idx:e_idx, vars_seleccionadas, drop = FALSE]
-    pred_res <- predict(best_model, data = newdata_chunk, num.threads = 8)
+    pred_res <- predict(best_model, data = newdata_chunk, num.threads = N_CORES)
     temp.dt$prediction[s_idx:e_idx] <- pred_res$predictions
   }
   
-  # Generate the predicted map
   pred_raster <- bios_selected[[1]] * NA
   names(pred_raster) <- "Predicted_Ho"
   pred_raster[temp.dt$cell_idx] <- temp.dt$prediction
-  writeRaster(pred_raster,file.path(outdir, paste0(sp_name,"_",
-                                                   "Ho_Macrogenetics_Map_RF.tif")),overwrite=T)
   
-  ################################################################################
-  #mess
+  # MESS calculation
   bios_selected_stack <- raster::stack(bios_selected)
-  mess_RN <- terra::rast(dismo::mess(x = bios_selected_stack,v= data_sel[,vars_seleccionadas]))
-  mess_RN <- terra::resample(mess_RN,sdm,"bilinear")
-  # mess_RN2plot(mess_RN)
-  terra::writeRaster(mess_RN,file.path(outdir,paste0(sp_name,"_", "MESS.tif")),overwrite=T)
+  mess_RN <- terra::rast(dismo::mess(x = bios_selected_stack, v = data_sel[, vars_seleccionadas]))
+  mess_RN <- terra::resample(mess_RN, sdm, method = "bilinear")
+  
   mess_RN2 <- mess_RN
   mess_RN2[mess_RN2 <= 0 | is.infinite(mess_RN2)] <- NA
-  # qM <- global(mess_RN2, fun = quantile, probs = 0.5, na.rm = TRUE)
-  qM <- 0
-  mess_RN2[which(mess_RN2[]<=as.numeric(qM))] <- NA
-  mess_RN2[which(mess_RN2[]>as.numeric(qM))] <- 1
+  mess_RN2[!is.na(mess_RN2)] <- 1
   
   pred_raster_no_interpolated <- pred_raster * mess_RN2
-  writeRaster(pred_raster_no_interpolated,file.path(outdir,paste0(sp_name,"_",
-                                                                  "Ho_Macrogenetics_Map_RF_final.tif")
-  ),overwrite=T)
+  terra::writeRaster(pred_raster_no_interpolated, file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_RF_final.tif")), overwrite = TRUE)
   
   # ------------------------------------------------------------------------------
-  # 8. MAP EXPORT WITH TMAP
+  # 7. COMPARISON AND SPATIAL AUTOCORRELATION (MORAN'S I)
   # ------------------------------------------------------------------------------
-  data("World", package = "tmap")
-  
-  map_out <- tm_shape(pred_raster_no_interpolated) + 
-    tm_raster(
-      col.legend = tm_legend(title = "Ho"),
-      palette = RColorBrewer::brewer.pal(7, "YlGnBu")
-    ) +
-    tm_shape(World) + 
-    tm_borders(col = "grey40") +
-    tm_shape(my_sf_object) +
-    tm_symbols(col = "red", size = 0.2) +
-    tm_graticules(labels.size = 0.7) +
-    tm_layout(inner.margins = 0, legend.outside = TRUE, legend.outside.position = "right")
-  
-  tmap::tmap_save(tm = map_out, filename = file.path(outdir, paste0(sp_name,"_",
-                                                                    "Ho_Macrogenetics_Map_RF_final.pdf")), 
-                  width = 25, height = 15, units = "cm", dpi = 300)
-  
-  ################################################################################
-  
-  # In-sample predictions (fit on training data)
   train_preds <- predict(best_model, data = data_sel)$predictions
   train_df    <- data.frame(Observed = data_sel$Ho, Predicted = train_preds)
   res_train   <- caret::postResample(train_df$Predicted, train_df$Observed)
   
-  cat(sprintf("\n=======================================================\n"))
-  cat(sprintf("FINAL MODEL FIT (Train): RMSE = %.4f | R2 = %.4f\n", res_train["RMSE"], res_train["Rsquared"]))
-  cat(sprintf("LOOCV VALIDATION (Test)   : RMSE = %.4f | R2 = %.4f | NSE R2 = %.4f\n", res_loocv["RMSE"], res_loocv["Rsquared"], r2_nse_test))
-  cat(sprintf("=======================================================\n\n"))
-  # ------------------------------------------------------------------------------
-  # PLOT COMPOSITION: TRAIN (fit) VS TEST (LOOCV)
-  # ------------------------------------------------------------------------------
   p_train <- ggplot(train_df, aes(x = Observed, y = Predicted)) +
     geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
     stat_poly_line(color = "darkgreen") +
     stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
     geom_point(size = 3, alpha = 0.8, color = "darkgreen") +
-    labs(title = "A) Final Model Fit (Train)",
-         subtitle = paste("Trained on n =", n_samples, "cells"),
-         x = "Observed Ho", 
-         y = "Predicted Ho") +
+    labs(title = "A) Final Model Fit (Train)", subtitle = paste("n =", n_samples, "cells"), x = "Observed Ho", y = "Predicted Ho") +
     theme_bw(13)
   
   p_test <- ggplot(loocv_df, aes(x = Observed, y = Predicted)) +
@@ -560,79 +452,59 @@ RF_LOOCV <- function(outdir,sp_name,raster_dir,data_path,sdm_path,N_CORES,boruta
     stat_poly_line(color = "blue") +
     stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
     geom_point(size = 3, alpha = 0.8, color = "blue") +
-    labs(title = "B) Nested LOOCV Validation (Test)",
-         subtitle = "Real predictive capacity assessment",
-         x = "Observed Ho", 
-         y = "Predicted Ho") +
+    labs(title = "B) Nested LOOCV Validation (Test)", subtitle = "Real predictive capacity assessment", x = "Observed Ho", y = "Predicted Ho") +
     theme_bw(13)
   
-  # Combine both panels with patchwork
-  p_comparison <- p_train + p_test
+  ggsave(file.path(outdir, paste0(sp_name, "_Model_Performance_Train_vs_LOOCV.png")), p_train + p_test, width = 12, height = 5.5, dpi = 300)
   
-  ggsave(file.path(outdir, paste0(sp_name,"_","Model_Performance_Train_vs_LOOCV.png")), 
-         p_comparison, width = 12, height = 5.5, dpi = 300)
+  # Spatial autocorrelation with ape::Moran.I
+  residuos_loocv <- data_sel$Ho - loocv_preds
+  pts_sf <- data_aggregated_sf_sp_sel %>% sf::st_cast("POINT")
   
-  
-  #------------------------------------------------------------------------------
-  # CHECK: SPATIAL AUTOCORRELATION IN THE LOOCV RESIDUALS
-  # ------------------------------------------------------------------------------
-  residuos_loocv <- data_sel$Ho - loocv_df$Predicted
-  
-  # Spatial weights matrix: inverse distance between cells.
-  # data_sel does not carry lon/lat directly -- they come from
-  # data_aggregated_sf_sp_sel, which does retain those columns (or
-  # cell_lon/cell_lat, depending on how you left them).
-  coords_dist <- as.matrix(dist(cbind(data_aggregated_sf_sp_sel$lon,
-                                      data_aggregated_sf_sp_sel$lat)))
-  
-  # Avoid division by zero on the diagonal
-  diag(coords_dist) <- 1
-  pesos_espaciales <- 1 / coords_dist
+  coords_dist_mat <- as.matrix(sf::st_distance(pts_sf)) / 1000
+  diag(coords_dist_mat) <- NA
+  pesos_espaciales <- 1 / coords_dist_mat
   diag(pesos_espaciales) <- 0
+  pesos_espaciales[is.na(pesos_espaciales) | is.infinite(pesos_espaciales)] <- 0
+  
+  row_sums <- rowSums(pesos_espaciales)
+  pesos_espaciales <- pesos_espaciales / ifelse(row_sums == 0, 1, row_sums)
   
   moran_result <- ape::Moran.I(residuos_loocv, pesos_espaciales)
   
-  cat(sprintf("\n--- MORAN'S I ON LOOCV RESIDUALS ---\nObserved: %.4f | Expected: %.4f | p-value: %.4f\n",
-              moran_result$observed, moran_result$expected, moran_result$p.value))
-  
   write.csv(
-    data.frame(observed = moran_result$observed,
-               expected = moran_result$expected,
-               sd = moran_result$sd,
-               p_value = moran_result$p.value),
-    file.path(outdir, paste0(sp_name,"_","Moran_I_residuos_LOOCV.csv")),
+    data.frame(observed = moran_result$observed, expected = moran_result$expected, sd = moran_result$sd, p_value = moran_result$p.value),
+    file.path(outdir, paste0(sp_name, "_Moran_I_LOOCV_residuals.csv")),
     row.names = FALSE
   )
-  ################################################################################
-  #save model
-  message("Process finished successfully. Outputs saved to: ", outdir)
-  save.image(file.path(outdir, paste0(sp_name,"_","Ho_Macrogenetics_Map_RF_final.RData")))
+  
+  message("Process successfully finished for: ", sp_name)
+  save.image(file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_RF_final.RData")))
 }
-
 
 CA <- RF_LOOCV(outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
                sp_name = "Crocodylus acutus",
                raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
                data_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
                sdm_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif",
-               N_CORES = 6,
-               boruta_threshold = 10,
-               n_seeds = 10)
+               N_CORES = 8,
+               boruta_threshold = 30,
+               n_seeds = 30)
 
 CI <- RF_LOOCV(outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
                sp_name = "Crocodylus intermedius",
                raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
                data_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
                sdm_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_intermedius/Crocodylus_intermedius_Binario_P10.tif",
-               N_CORES = 6,
-               boruta_threshold = 10,
-               n_seeds = 10)
+               N_CORES = 8,
+               boruta_threshold = 30,
+               n_seeds = 30)
 
 CM <- RF_LOOCV(outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
                sp_name = "Crocodylus moreletii",
                raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
                data_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
                sdm_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
-               N_CORES = 6,
-               boruta_threshold = 10,
-               n_seeds = 10)
+               N_CORES = 8,
+               boruta_threshold = 30,
+               n_seeds = 30)

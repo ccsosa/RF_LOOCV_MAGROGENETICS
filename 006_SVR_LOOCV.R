@@ -1,0 +1,351 @@
+#' @title Spatial Prediction Workflow for Genetic Heterozygosity using SVR (Linear Kernel)
+#' 
+#' @description Executes a spatial prediction pipeline for observed heterozygosity 
+#' (\emph{Ho}) in macrogenetic studies using Support Vector Regression with a Linear 
+#' Kernel (\code{svmLinear}) and Leave-One-Out Cross-Validation (LOOCV).
+#'
+#' @param outdir \code{character}. Output directory path where results and maps will be saved.
+#' @param sp_name \code{character}. Target species name used to filter the input genetic data.
+#' @param raster_dir \code{character}. Directory path containing individual raster layers in \code{.tif} format (must include \code{lon.tif} and \code{lat.tif}).
+#' @param data_path \code{character}. File path to the Excel file (\code{.xlsx}) containing genetic and coordinate data.
+#' @param sdm_path \code{character}. File path to the binary Species Distribution Model / Ecological Niche Model raster (\code{.tif}).
+#' @param n_cores \code{integer}. Number of processing cores to allocate for parallel operations (defaults to \code{6L}).
+#'
+#' @return Returns invisibly (\code{invisible(NULL)}).
+#' @export
+svr_ho_pipeline <- function(outdir, 
+                            sp_name, 
+                            raster_dir, 
+                            data_path, 
+                            sdm_path, 
+                            n_cores = 6L) {
+  
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+  
+  # ------------------------------------------------------------------------------
+  # 1. RASTER & GENETIC DATA LOADING
+  # ------------------------------------------------------------------------------
+  bios_files <- list.files(raster_dir, pattern = "\\.tif$", full.names = TRUE)
+  bios_names <- sub("\\.tif$", "", list.files(raster_dir, pattern = "\\.tif$"))
+  
+  bios <- terra::rast(bios_files)
+  names(bios) <- bios_names
+  
+  if (!all(c("lon", "lat") %in% names(bios))) {
+    stop("Error: 'lon' and/or 'lat' layers are missing from the raster directory.")
+  }
+  
+  data <- readxl::read_xlsx(data_path, sheet = "data") %>%
+    dplyr::filter(sp == sp_name, !is.na(Ho), !is.na(lat), !is.na(lon))
+  
+  my_sf_object <- sf::st_as_sf(data, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+  points_vect  <- terra::vect(my_sf_object)
+  
+  # ------------------------------------------------------------------------------
+  # 2. CELL ASSIGNMENT & SPATIAL AGGREGATION
+  # ------------------------------------------------------------------------------
+  cell_ids <- terra::cells(bios[[1]], points_vect)[, "cell"]
+  na_cells <- which(is.na(cell_ids))
+  
+  if (length(na_cells) > 0) {
+    message(sprintf("Assigning %d off-coverage points to nearest valid raster cell...", length(na_cells)))
+    extracted_cells <- terra::extract(
+      bios[[1]],
+      points_vect[na_cells, ],
+      buffer = 5000,
+      fun = "first",
+      cells = TRUE,
+      exact = FALSE
+    )
+    cell_ids[na_cells] <- extracted_cells$cell
+  }
+  
+  my_sf_object$cell_id  <- cell_ids
+  coords_cells          <- terra::xyFromCell(bios[[1]], cell_ids)
+  my_sf_object$cell_lon <- coords_cells[, 1]
+  my_sf_object$cell_lat <- coords_cells[, 2]
+  my_sf_object          <- my_sf_object[!is.na(my_sf_object$cell_id), ]
+  
+  data_aggregated_sf <- my_sf_object %>%
+    dplyr::group_by(cell_id) %>%
+    dplyr::summarise(
+      n_samples_in_cell = dplyr::n(),
+      Ho  = mean(Ho, na.rm = TRUE),
+      lon = mean(cell_lon, na.rm = TRUE),
+      lat = mean(cell_lat, na.rm = TRUE),
+      .groups = "drop"
+    )
+  if(nrow(data_aggregated_sf)>29){
+    message("Trying to modelling: ",nrow(data_aggregated_sf)," grids available")
+  } else {
+    stop("Less than 30 grids ... LOOCV can fail")
+  }
+  
+  bios_focal <- terra::focal(bios, w = 15, fun = mean, na.policy = "only", na.rm = TRUE)
+  gc()
+  
+  unique_points_vect <- terra::vect(data_aggregated_sf)
+  ext_direct         <- terra::extract(bios_focal, unique_points_vect)
+  
+  if (any(!complete.cases(ext_direct))) {
+    message("Coastal points with NA values detected. Extracting values from nearest valid pixel...")
+    na_rows <- which(!complete.cases(ext_direct))
+    for (i in na_rows) {
+      ext_nearest <- terra::extract(bios_focal, unique_points_vect[i, ], nearest = TRUE)
+      ext_direct[i, names(bios)] <- ext_nearest[, names(bios)]
+    }
+  }
+  
+  ext_direct_clean <- ext_direct %>%
+    dplyr::group_by(ID) %>%
+    dplyr::summarise(dplyr::across(dplyr::everything(), ~ mean(.x, na.rm = TRUE))) %>%
+    dplyr::select(-ID)
+  
+  data_aggregated_sp <- cbind(data_aggregated_sf, ext_direct_clean)
+  rm(ext_direct_clean); gc()
+  
+  # ------------------------------------------------------------------------------
+  # 3. FEATURE SELECTION & CONTROLLED DECORRELATION
+  # ------------------------------------------------------------------------------
+  data_sel <- data_aggregated_sp %>%
+    dplyr::select(Ho, n_samples_in_cell, dplyr::all_of(names(bios))) %>%
+    sf::st_drop_geometry()
+  
+  valid_rows <- complete.cases(data_sel)
+  data_sel   <- data_sel[valid_rows, ]
+  n_samples  <- nrow(data_sel)
+  
+  bio_vars_only <- setdiff(names(bios), c("lon", "lat"))
+  
+  cor_matrix <- cor(as.data.frame(data_sel[, bio_vars_only]))
+  to_remove  <- caret::findCorrelation(cor_matrix, cutoff = 0.35)
+  
+  selected_bios <- if (length(to_remove) > 0) bio_vars_only[-to_remove] else bio_vars_only
+  
+  predictors_list <- c("lon", "lat", selected_bios)
+  message(sprintf("Selected predictors (%d total): %s", 
+                  length(predictors_list), paste(predictors_list, collapse = ", ")))
+  
+  data_sel_model <- as.data.frame(data_sel[, c("Ho", "n_samples_in_cell", predictors_list)])
+  
+  if(nrow(data_sel_model)>29){
+    message("Trying to modelling: ",nrow(data_sel_model)," grids available")
+  } else {
+    stop("Less than 30 grids ... LOOCV can fail")
+  }
+  # ------------------------------------------------------------------------------
+  # 4. LINEAR SVR MODEL TRAINING WITH LOOCV
+  # ------------------------------------------------------------------------------
+  weights_vec    <- data_sel_model$n_samples_in_cell
+  data_sel_model <- data_sel_model %>% dplyr::select(-n_samples_in_cell)
+  
+  train_ctrl <- caret::trainControl(
+    method = "LOOCV",
+    savePredictions = "final"
+  )
+  
+  svm_grid_linear <- expand.grid(
+    C = 10^seq(-3, 2, length.out = 25)
+  )
+  
+  set.seed(123)
+  final_svr <- caret::train(
+    Ho ~ .,
+    data       = data_sel_model,
+    method     = "svmLinear",
+    weights    = weights_vec,
+    preProcess = c("center", "scale"), # Caret normaliza automáticamente aquí y al predecir
+    trControl  = train_ctrl,
+    tuneGrid   = svm_grid_linear,
+    metric     = "RMSE"
+  )
+  
+  message("== Optimal Cost (C) Parameter Selected ==")
+  print(final_svr$bestTune)
+  
+  # ------------------------------------------------------------------------------
+  # 5. MODEL METRICS
+  # ------------------------------------------------------------------------------
+  train_pred_vals <- predict(final_svr, newdata = data_sel_model)
+  train_df <- data.frame(
+    Observed  = data_sel_model$Ho,
+    Predicted = train_pred_vals
+  )
+  
+  train_rmse <- yardstick::rmse_vec(train_df$Observed, train_df$Predicted)
+  train_mae  <- yardstick::mae_vec(train_df$Observed, train_df$Predicted)
+  train_rsq  <- yardstick::rsq_vec(train_df$Observed, train_df$Predicted)
+  
+  loocv_preds <- final_svr$pred %>%
+    dplyr::filter(C == final_svr$bestTune$C) %>%
+    dplyr::arrange(rowIndex)
+  
+  loocv_df <- data.frame(
+    Observed  = loocv_preds$obs,
+    Predicted = loocv_preds$pred
+  )
+  
+  test_rmse <- yardstick::rmse_vec(loocv_df$Observed, loocv_df$Predicted)
+  test_mae  <- yardstick::mae_vec(loocv_df$Observed, loocv_df$Predicted)
+  test_rsq  <- yardstick::rsq_vec(loocv_df$Observed, loocv_df$Predicted)
+  
+  metrics_out <- data.frame(
+    .metric = c("rmse", "mae", "rsq", "rmse", "mae", "rsq"),
+    mean    = c(test_rmse, test_mae, test_rsq, train_rmse, train_mae, train_rsq),
+    dataset = c("loocv_test", "loocv_test", "loocv_test", "train", "train", "train")
+  )
+  
+  write.csv(metrics_out, file.path(outdir, paste0(sp_name, "_SVM_Metrics.csv")), row.names = FALSE)
+  
+  # ------------------------------------------------------------------------------
+  # 6. EVALUATIVE PLOTS
+  # ------------------------------------------------------------------------------
+  p_train <- ggplot(train_df, aes(x = Observed, y = Predicted)) +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    stat_poly_line(color = "darkgreen") +
+    stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
+    geom_point(size = 3, alpha = 0.8, color = "darkgreen") +
+    labs(title = "A) Final SVM Model Fit (Train)",
+         subtitle = paste("n =", n_samples, "cells"),
+         x = "Observed Ho", y = "Predicted Ho") +
+    theme_bw(13)
+  
+  p_test <- ggplot(loocv_df, aes(x = Observed, y = Predicted)) +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    stat_poly_line(color = "blue") +
+    stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
+    geom_point(size = 3, alpha = 0.8, color = "blue") +
+    labs(title = "B) LOOCV Validation (Test)",
+         subtitle = "Real predictive capacity assessment (Leave-One-Out)",
+         x = "Observed Ho", y = "Predicted Ho") +
+    theme_bw(13)
+  
+  ggsave(
+    file.path(outdir, paste0(sp_name, "_SVM_Model_Performance_Train_vs_CV.png")),
+    p_train + p_test, width = 12, height = 5.5, dpi = 1000
+  )
+  
+  # ------------------------------------------------------------------------------
+  # 7. SPATIAL PREDICTION (CHUNKED RASTER PROCESSING)
+  # ------------------------------------------------------------------------------
+  sdm <- terra::rast(sdm_path) * 1
+  sdm[sdm == 0] <- NA
+  
+  bios_selected <- bios[[predictors_list]]
+  bios_selected <- terra::resample(bios_selected, sdm, method = "bilinear")
+  bios_selected <- bios_selected * sdm
+  
+  valid_cells <- terra::cells(bios_selected[[1]])
+  
+  # Extracción limpia asegurando solo las columnas de predictores
+  temp_dt <- as.data.frame(terra::extract(bios_selected, valid_cells))
+  if ("ID" %in% colnames(temp_dt)) temp_dt$ID <- NULL
+  temp_dt$cell_idx <- valid_cells
+  
+  valid_rows <- complete.cases(temp_dt[, predictors_list, drop = FALSE])
+  temp_dt    <- temp_dt[valid_rows, ]
+  temp_dt$prediction <- NA_real_
+  
+  chunk_size <- 50000
+  n_rows     <- nrow(temp_dt)
+  n_chunks   <- ceiling(n_rows / chunk_size)
+  
+  for (i in seq_len(n_chunks)) {
+    s_idx <- ((i - 1) * chunk_size) + 1
+    e_idx <- min(i * chunk_size, n_rows)
+    
+    newdata_chunk <- temp_dt[s_idx:e_idx, predictors_list, drop = FALSE]
+    
+    # caret aplica automáticamente la estandarización center/scale con las medias de train
+    pred_res <- predict(final_svr, newdata = newdata_chunk)
+    temp_dt$prediction[s_idx:e_idx] <- pred_res
+  }
+  
+  pred_raster <- bios_selected[[1]] * NA
+  names(pred_raster) <- "Predicted_Ho"
+  pred_raster[temp_dt$cell_idx] <- temp_dt$prediction
+  
+  # ------------------------------------------------------------------------------
+  # 8. MESS MASKING (ENVIRONMENTAL EXTRAPOLATION FILTER)
+  # ------------------------------------------------------------------------------
+  bios_selected_stack <- raster::stack(bios_selected)
+  
+  # Extracción segura de la matriz de referencia para dismo::mess
+  ref_data <- as.data.frame(data_sel_model[, predictors_list, drop = FALSE])
+  
+  mess_rn <- terra::rast(dismo::mess(x = bios_selected_stack, v = ref_data))
+  mess_rn <- terra::resample(mess_rn, sdm, method = "bilinear")
+  
+  mess_mask <- mess_rn
+  mess_mask[mess_mask <= 0 | is.infinite(mess_mask)] <- NA
+  mess_mask[!is.na(mess_mask)] <- 1
+  
+  pred_raster_no_interpolated <- pred_raster * mess_mask
+  
+  final_pred_file <- file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final.tif"))
+  terra::writeRaster(pred_raster_no_interpolated, final_pred_file, overwrite = TRUE)
+  
+  # ------------------------------------------------------------------------------
+  # 9. PDF MAP EXPORT
+  # ------------------------------------------------------------------------------
+  data("World", package = "tmap")
+  
+  map_out <- tm_shape(pred_raster_no_interpolated) + 
+    tm_raster(
+      col.legend = tm_legend(title = "Ho"),
+      palette = RColorBrewer::brewer.pal(7, "YlGnBu")
+    ) +
+    tm_shape(World) + 
+    tm_borders(col = "grey40") +
+    # Puntos originales de muestreo (todos los datos iniciales)
+    tm_shape(my_sf_object) +
+    tm_symbols(col = "grey20", size = 0.15, alpha = 0.6) +
+    # Puntos agregados por celda (los realmente usados en la modelación SVR)
+    tm_shape(data_aggregated_sf) +
+    tm_symbols(col = "red", size = 0.35, shape = 21, border.col = "black", border.lwd = 0.5) +
+    tm_graticules(labels.size = 0.7) +
+    tm_layout(inner.margins = 0, legend.outside = TRUE, legend.outside.position = "right")
+  
+  tmap::tmap_save(
+    tm       = map_out, 
+    filename = file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final.pdf")), 
+    width    = 25, 
+    height   = 15, 
+    units    = "cm", 
+    dpi      = 1000
+  )
+  message("Pipeline completed successfully. Saving R workspace environment...")
+  save.image(file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_svm_final.RData")))
+  
+  invisible(NULL)
+}
+
+# Executive execution for Crocodylus acutus
+CA <- svr_ho_pipeline(
+  outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
+  sp_name    = "Crocodylus acutus",
+  raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
+  data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
+  sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif",
+  n_cores    = 8
+)
+
+# Executive execution for Crocodylus intermedius
+CI <- svr_ho_pipeline(
+  outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
+  sp_name    = "Crocodylus intermedius",
+  raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
+  data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
+  sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_intermedius/Crocodylus_intermedius_Binario_P10.tif",
+  n_cores    = 8
+)
+
+# Executive execution for Crocodylus moreletii
+CM <- svr_ho_pipeline(
+  outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
+  sp_name    = "Crocodylus moreletii",
+  raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
+  data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
+  sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
+  n_cores    = 8
+)
