@@ -111,7 +111,9 @@ svr_ho_pipeline(
   raster_dir = "path/to/raster_dir",
   data_path  = "path/to/genetic_data.xlsx",
   sdm_path   = "path/to/binary_sdm.tif",
-  n_cores    = 8L
+  n_cores    = 8L,
+  cor_cutoff = 0.6,
+  addLonLat = T # use lon and lat as predictors
 )
 ```
 

@@ -13,15 +13,39 @@
 #'
 #' @return Returns invisibly (\code{invisible(NULL)}).
 #' @export
+# ==============================================================================
+# REQUIRED LIBRARIES / SCRIPT DEPENDENCIES
+# ==============================================================================
+library(dplyr)        # Data manipulation and %>% pipe operators
+library(readxl)       # Reading Excel files (.xlsx)
+library(sf)           # Handling spatial vector data
+library(terra)        # High-performance spatial raster operations and processing
+library(caret)        # SVR model training, tuneGrid, and feature selection
+library(doParallel)   # Parallel processing execution
+library(kernlab)      # Backend engine executing 'svmLinear' in caret
+library(yardstick)    # Model performance metrics calculation (RMSE, MAE, R2)
+library(ggplot2)      # Data visualization and plotting
+library(ggpmisc)      # Annotating equations and R2 in plots (stat_poly_eq)
+library(patchwork)    # Combining multiple plots (p_train + p_test)
+library(raster)       # Converting 'terra' objects to 'raster' for dismo support
+library(dismo)        # MESS (Multivariate Environmental Similarity Surface) masking
+library(RColorBrewer) # Color palettes for spatial maps
+library(tmap)         # Thematic map generation and export
+
 svr_ho_pipeline <- function(outdir, 
                             sp_name, 
                             raster_dir, 
                             data_path, 
                             sdm_path, 
-                            n_cores = 6L) {
+                            n_cores = 6L,
+                            cor_cutoff,
+                            addLonLat) {
   
   dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
   
+  if(isTRUE(addLonLat)){
+    message("using lon and lat as predictors")
+  }
   # ------------------------------------------------------------------------------
   # 1. RASTER & GENETIC DATA LOADING
   # ------------------------------------------------------------------------------
@@ -118,11 +142,17 @@ svr_ho_pipeline <- function(outdir,
   bio_vars_only <- setdiff(names(bios), c("lon", "lat"))
   
   cor_matrix <- cor(as.data.frame(data_sel[, bio_vars_only]))
-  to_remove  <- caret::findCorrelation(cor_matrix, cutoff = 0.35)
+  to_remove  <- caret::findCorrelation(cor_matrix, cutoff = cor_cutoff)
   
   selected_bios <- if (length(to_remove) > 0) bio_vars_only[-to_remove] else bio_vars_only
   
-  predictors_list <- c("lon", "lat", selected_bios)
+  
+  if(isTRUE(addLonLat)){
+    predictors_list <- c("lon", "lat", selected_bios)
+  } else {
+    predictors_list <- selected_bios
+    
+  }
   message(sprintf("Selected predictors (%d total): %s", 
                   length(predictors_list), paste(predictors_list, collapse = ", ")))
   
@@ -139,9 +169,14 @@ svr_ho_pipeline <- function(outdir,
   weights_vec    <- data_sel_model$n_samples_in_cell
   data_sel_model <- data_sel_model %>% dplyr::select(-n_samples_in_cell)
   
+  library(doParallel)
+  cl <- makeCluster(n_cores)
+  registerDoParallel(cl)
+  
   train_ctrl <- caret::trainControl(
     method = "LOOCV",
-    savePredictions = "final"
+    savePredictions = "final",
+    allowParallel = T
   )
   
   svm_grid_linear <- expand.grid(
@@ -163,6 +198,8 @@ svr_ho_pipeline <- function(outdir,
   message("== Optimal Cost (C) Parameter Selected ==")
   print(final_svr$bestTune)
   
+  stopCluster(cl)
+  registerDoSEQ()
   # ------------------------------------------------------------------------------
   # 5. MODEL METRICS
   # ------------------------------------------------------------------------------
@@ -195,7 +232,12 @@ svr_ho_pipeline <- function(outdir,
     dataset = c("loocv_test", "loocv_test", "loocv_test", "train", "train", "train")
   )
   
-  write.csv(metrics_out, file.path(outdir, paste0(sp_name, "_SVM_Metrics.csv")), row.names = FALSE)
+  if(isTRUE(addLonLat)){
+    write.csv(metrics_out, file.path(outdir, paste0(sp_name, "_SVM_Metrics_LONLAT.csv")), row.names = FALSE)  
+  } else {
+    write.csv(metrics_out, file.path(outdir, paste0(sp_name, "_SVM_Metrics.csv")), row.names = FALSE)
+  }
+  
   
   # ------------------------------------------------------------------------------
   # 6. EVALUATIVE PLOTS
@@ -220,10 +262,20 @@ svr_ho_pipeline <- function(outdir,
          x = "Observed Ho", y = "Predicted Ho") +
     theme_bw(13)
   
-  ggsave(
-    file.path(outdir, paste0(sp_name, "_SVM_Model_Performance_Train_vs_CV.png")),
-    p_train + p_test, width = 12, height = 5.5, dpi = 1000
-  )
+  
+  if(isTRUE(addLonLat)){
+    ggsave(
+      file.path(outdir, paste0(sp_name, "_SVM_Model_Performance_Train_vs_CV_LONLAT.png")),
+      p_train + p_test, width = 12, height = 5.5, dpi = 1000
+    )  } else {
+      ggsave(
+        file.path(outdir, paste0(sp_name, "_SVM_Model_Performance_Train_vs_CV.png")),
+        p_train + p_test, width = 12, height = 5.5, dpi = 1000
+      ) 
+    }
+  
+  
+  
   
   # ------------------------------------------------------------------------------
   # 7. SPATIAL PREDICTION (CHUNKED RASTER PROCESSING)
@@ -282,7 +334,12 @@ svr_ho_pipeline <- function(outdir,
   
   pred_raster_no_interpolated <- pred_raster * mess_mask
   
-  final_pred_file <- file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final.tif"))
+  if(isTRUE(addLonLat)){
+    final_pred_file <- file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final_LONLAT.tif"))
+    
+  } else {
+    final_pred_file <- file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final.tif"))
+  }
   terra::writeRaster(pred_raster_no_interpolated, final_pred_file, overwrite = TRUE)
   
   # ------------------------------------------------------------------------------
@@ -306,16 +363,35 @@ svr_ho_pipeline <- function(outdir,
     tm_graticules(labels.size = 0.7) +
     tm_layout(inner.margins = 0, legend.outside = TRUE, legend.outside.position = "right")
   
-  tmap::tmap_save(
-    tm       = map_out, 
-    filename = file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final.pdf")), 
-    width    = 25, 
-    height   = 15, 
-    units    = "cm", 
-    dpi      = 1000
-  )
+  
+  if(isTRUE(addLonLat)){
+    tmap::tmap_save(
+      tm       = map_out, 
+      filename = file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final_LONLAT.pdf")), 
+      width    = 25, 
+      height   = 15, 
+      units    = "cm", 
+      dpi      = 1000
+    )
+    
+  } else {
+    tmap::tmap_save(
+      tm       = map_out, 
+      filename = file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_SVM_final.pdf")), 
+      width    = 25, 
+      height   = 15, 
+      units    = "cm", 
+      dpi      = 1000
+    )
+    
+  }
   message("Pipeline completed successfully. Saving R workspace environment...")
-  save.image(file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_svm_final.RData")))
+  if(isTRUE(addLonLat)){
+    save.image(file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_svm_final_LONLAT.RData")))  
+  } else  {
+    save.image(file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_svm_final.RData")))
+  }
+  
   
   invisible(NULL)
 }
@@ -327,7 +403,20 @@ CA <- svr_ho_pipeline(
   raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif",
-  n_cores    = 8
+  n_cores    = 8,
+  cor_cutoff = 0.6,
+  addLonLat = T
+)
+
+CA2 <- svr_ho_pipeline(
+  outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
+  sp_name    = "Crocodylus acutus",
+  raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
+  data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
+  sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif",
+  n_cores    = 8,
+  cor_cutoff = 0.6,
+  addLonLat = F
 )
 
 # Executive execution for Crocodylus intermedius
