@@ -1,17 +1,56 @@
-#' @title Spatial Prediction Workflow for Genetic Heterozygosity using SVR (Linear Kernel)
-#' 
-#' @description Executes a spatial prediction pipeline for observed heterozygosity 
-#' (\emph{Ho}) in macrogenetic studies using Support Vector Regression with a Linear 
-#' Kernel (\code{svmLinear}) and Leave-One-Out Cross-Validation (LOOCV).
+#' Spatial Prediction Workflow for Genetic Heterozygosity (Ho) using Support Vector Regression
 #'
-#' @param outdir \code{character}. Output directory path where results and maps will be saved.
-#' @param sp_name \code{character}. Target species name used to filter the input genetic data.
-#' @param raster_dir \code{character}. Directory path containing individual raster layers in \code{.tif} format (must include \code{lon.tif} and \code{lat.tif}).
-#' @param data_path \code{character}. File path to the Excel file (\code{.xlsx}) containing genetic and coordinate data.
-#' @param sdm_path \code{character}. File path to the binary Species Distribution Model / Ecological Niche Model raster (\code{.tif}).
-#' @param n_cores \code{integer}. Number of processing cores to allocate for parallel operations (defaults to \code{6L}).
+#' @description
+#' Executes an end-to-end spatial modeling and prediction pipeline for observed genetic 
+#' heterozygosity (\emph{Ho}) across geographic landscapes. The workflow integrates spatial 
+#' aggregation of genetic point data, environmental raster decorrelation, hyperparameter-tuned 
+#' Support Vector Regression (SVR), cross-validation, extrapolation filtering via Multivariate 
+#' Environmental Similarity Surface (MESS), and automated cartographic generation.
 #'
-#' @return Returns invisibly (\code{invisible(NULL)}).
+#' @details
+#' The pipeline performs the following sequential steps:
+#' \enumerate{
+#'   \item \strong{Data Loading & Spatial Alignment:} Reads bioclimatic rasters and genetic sample records, aligning off-coverage coordinates to the nearest valid raster grid cell.
+#'   \item \strong{Grid Aggregation:} Aggregates genetic sampling points located within the same raster cell, computing mean observed heterozygosity (\emph{Ho}) and sample weights.
+#'   \item \strong{Feature Selection:} Removes collinear predictors using a absolute correlation cutoff (\code{cor_cutoff}) applied to bioclimatic variables.
+#'   \item \strong{Model Training & Tuning:} Fits an SVR model (\code{svmRadial} or \code{svmLinear}) via \code{caret::train} using sample counts as fitting weights, optimized over a hyperparameter grid.
+#'   \item \strong{Cross-Validation:} Evaluates generalization performance using either Leave-One-Out Cross-Validation (LOOCV) or Repeated $K$-Fold CV ($5 \times 10$).
+#'   \item \strong{Raster Prediction & MESS Masking:} Predicts \emph{Ho} across the target species distribution area (SDM) in memory-safe chunks and masks non-analogous environmental regions ($MESS \le 0$).
+#'   \item \strong{Export:} Writes clean datasets, model performance metrics, scatterplots, spatial prediction rasters (\code{.tif}), thematic maps (\code{.pdf}), and complete workspace states (\code{.RData}).
+#' }
+#'
+#' @param outdir \code{character}. Output directory path where all metrics, figures, rasters, and workspace files will be saved.
+#' @param sp_name \code{character}. Exact target species name used to filter records in the input Excel dataset.
+#' @param raster_dir \code{character}. Directory path containing individual predictor raster layers in \code{.tif} format. Must include \code{"lon.tif"} and \code{"lat.tif"}.
+#' @param data_path \code{character}. File path to the Excel file (\code{.xlsx}) containing genetic data, species names (\code{sp}), observed heterozygosity (\code{Ho}), and geographic coordinates (\code{lon}, \code{lat}).
+#' @param sdm_path \code{character}. File path to the binary Species Distribution Model / Ecological Niche Model raster (\code{.tif}) used to constrain geographic predictions.
+#' @param n_cores \code{integer}. Number of processing cores allocated for parallel model training via \code{doParallel}. Default is \code{6L}.
+#' @param cor_cutoff \code{numeric}. Absolute pairwise Pearson correlation threshold used for removing collinear predictors (e.g., \code{0.5}). Default is \code{0.5}.
+#' @param addLonLat \code{logical}. If \code{TRUE}, explicit geographic coordinates (\code{lon} and \code{lat}) are retained as model predictors alongside bioclimatic variables. Default is \code{FALSE}.
+#' @param use_loocv \code{logical}. Cross-validation scheme controller. If \code{TRUE}, executes Leave-One-Out Cross-Validation (LOOCV). If \code{FALSE}, runs a 5-fold CV repeated 10 times. Default is \code{FALSE}.
+#' @param kernel_type \code{character}. Support Vector Machine kernel specification passed to \code{caret}. Supported options are \code{"svmRadial"} (Radial Basis Function / RBF) and \code{"svmLinear"}. Default is \code{"svmRadial"}.
+#'
+#' @return Invisibly returns \code{NULL}. All outputs (metrics CSVs, figures, GeoTIFFs, PDF maps, and \code{.RData} environments) are written to \code{outdir}.
+#'
+#' @author Jorge (Tesis Macrogenética)
+#' @keywords spatial-prediction macrogenetics SVR caret terra tmap
+#'
+#' @examples
+#' \dontrun{
+#' # Run pipeline using RBF Kernel with Repeated Cross-Validation
+#' svr_ho_pipeline(
+#'   outdir      = "C:/Research/Output",
+#'   sp_name     = "Crocodylus moreletii",
+#'   raster_dir  = "C:/Research/Rasters",
+#'   data_path   = "C:/Research/Data/Genetic_Data.xlsx",
+#'   sdm_path    = "C:/Research/SDM/C_moreletii_P10.tif",
+#'   n_cores     = 8L,
+#'   cor_cutoff  = 0.5,
+#'   addLonLat   = FALSE,
+#'   use_loocv   = FALSE,
+#'   kernel_type = "svmRadial"
+#' )
+#' }
 #' @export
 # ==============================================================================
 # REQUIRED LIBRARIES / SCRIPT DEPENDENCIES
@@ -39,7 +78,8 @@ svr_ho_pipeline <- function(outdir,
                             sdm_path, 
                             n_cores = 6L,
                             cor_cutoff,
-                            addLonLat) {
+                            addLonLat,
+                            LOOCV) {
   
   dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
   
@@ -180,15 +220,36 @@ svr_ho_pipeline <- function(outdir,
   weights_vec    <- data_sel_model$n_samples_in_cell
   data_sel_model <- data_sel_model %>% dplyr::select(-n_samples_in_cell)
   
+  if(isTRUE(addLonLat)){
+    write.csv(data_sel_model, file.path(outdir, paste0(sp_name, "data_clean_SVM_LONLAT.csv")), row.names = FALSE)  
+    message(predictors_list)  
+  } else {
+    write.csv(data_sel_model, file.path(outdir, paste0(sp_name, "data_clean_SVM.csv")), row.names = FALSE)  
+    message(predictors_list)
+  }
+  
   library(doParallel)
   cl <- makeCluster(n_cores)
   registerDoParallel(cl)
   
-  train_ctrl <- caret::trainControl(
-    method = "LOOCV",
-    savePredictions = "final",
-    allowParallel = T
-  )
+  if(isTRUE(LOOCV)){
+    message("using LOOCV")
+    train_ctrl <- caret::trainControl(
+      method = "LOOCV",
+      savePredictions = "final",
+      allowParallel = T
+    )  
+  } else {
+    message("repeatedcv")
+    train_ctrl <- caret::trainControl(
+      method = "repeatedcv",
+      number = 5,      # 5 folds (cada test ~40 celdas)
+      repeats = 10,    # 10 repeticiones
+      savePredictions = "final",
+      allowParallel = TRUE
+    )
+  }
+  
   
   svm_grid_linear <- expand.grid(
     C = 10^seq(-3, 2, length.out = 25)
@@ -259,7 +320,7 @@ svr_ho_pipeline <- function(outdir,
     stat_poly_line(color = "darkgreen") +
     stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
     geom_point(size = 3, alpha = 0.8, color = "darkgreen") +
-    labs(title = "A) Final SVM Model Fit (Train)",
+    labs(title = "A) Training ",
          subtitle = paste("n =", n_samples, "cells"),
          x = "Observed Ho", y = "Predicted Ho") +
     theme_bw(13)
@@ -269,8 +330,8 @@ svr_ho_pipeline <- function(outdir,
     stat_poly_line(color = "blue") +
     stat_poly_eq(use_label(c("R2", "p")), formula = y ~ x) +
     geom_point(size = 3, alpha = 0.8, color = "blue") +
-    labs(title = "B) LOOCV Validation (Test)",
-         subtitle = "Real predictive capacity assessment (Leave-One-Out)",
+    labs(title = "B) Validation (Test)",
+         subtitle = "",
          x = "Observed Ho", y = "Predicted Ho") +
     theme_bw(13)
   
@@ -416,8 +477,9 @@ CA <- svr_ho_pipeline(
   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif",
   n_cores    = 12,
-  cor_cutoff = 0.6,
-  addLonLat = T
+  cor_cutoff = 0.5,
+  addLonLat = T,
+  LOOCV = T
 )
 
 CA2 <- svr_ho_pipeline(
@@ -427,8 +489,9 @@ CA2 <- svr_ho_pipeline(
   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif",
   n_cores    = 8,
-  cor_cutoff = 0.6,
-  addLonLat = F
+  cor_cutoff = 0.5,
+  addLonLat = F,
+  LOOCV=T
 )
 
 # # Executive execution for Crocodylus intermedius
@@ -451,9 +514,10 @@ CM <- svr_ho_pipeline(
   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
   n_cores    = 8,
-  cor_cutoff = 0.6,
-  addLonLat = T
-  )
+  cor_cutoff = 0.5,
+  addLonLat = T,
+  LOOCV=F
+)
 
 CM2 <- svr_ho_pipeline(
   outdir     = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics",
@@ -462,6 +526,7 @@ CM2 <- svr_ho_pipeline(
   data_path  = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
   n_cores    = 8,
-  cor_cutoff = 0.6,
-  addLonLat = F
+  cor_cutoff = 0.5,
+  addLonLat =F,
+  LOOCV=F
 )
