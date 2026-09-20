@@ -463,4 +463,5 @@ CM2 <- svr_ho_pipeline(
   sdm_path   = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
   n_cores    = 8,
   cor_cutoff = 0.6,
-  addLonLa
+  addLonLat = F
+)
