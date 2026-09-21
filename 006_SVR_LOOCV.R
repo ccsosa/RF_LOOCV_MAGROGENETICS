@@ -137,7 +137,11 @@ svr_ho_pipeline <- function(outdir,
   data_aggregated_sp <- cbind(data_aggregated_sf, ext_direct_clean)
   rm(ext_direct_clean); gc()
   
-  # ------------------------------------------------------------------------------
+  if(nrow(data_aggregated_sp)>99){
+    message("more than 100 occurrences are availables, performing spatial thin at 5 km")
+    data_aggregated_sp <- terra::thin(vect(data_aggregated_sp),5000)
+    data_aggregated_sp<- st_as_sf(data_aggregated_sp)
+  }  # ------------------------------------------------------------------------------
   # 3. FEATURE SELECTION & DECORRELATION
   # ------------------------------------------------------------------------------
   if(isTRUE(aggregate_occs_cells)){
@@ -172,6 +176,7 @@ svr_ho_pipeline <- function(outdir,
   } else {
     data_sel_model <- as.data.frame(data_sel[, c("Ho", predictors_list)])
   }
+  
   
   # ------------------------------------------------------------------------------
   # 4. SVR MODEL TRAINING & VALIDATION SCHEME EVALUATION
