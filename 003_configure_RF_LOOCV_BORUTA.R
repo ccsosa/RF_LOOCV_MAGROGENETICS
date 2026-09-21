@@ -475,31 +475,31 @@ RF_LOOCV <- function(outdir,
   
   ggsave(file.path(outdir, paste0(sp_name, "_Model_Performance_Train_vs_LOOCV.png")), p_train + p_test, width = 12, height = 5.5, dpi = 300)
   
-  # Spatial autocorrelation with ape::Moran.I
-  residuos_loocv <- data_sel_model$Ho - loocv_preds
-  
-  # Ensure single POINT geometries and strip spatial units
-  pts_sf <- sf::st_centroid(data_aggregated_sp)
-  coords_dist_mat <- units::drop_units(sf::st_distance(pts_sf)) / 1000
-  
-  # Build spatial weights matrix
-  diag(coords_dist_mat) <- NA
-  pesos_espaciales <- 1 / coords_dist_mat
-  diag(pesos_espaciales) <- 0
-  pesos_espaciales[is.na(pesos_espaciales) | is.infinite(pesos_espaciales)] <- 0
-  
-  # Row-standardize weights
-  row_sums <- rowSums(pesos_espaciales)
-  pesos_espaciales <- pesos_espaciales / ifelse(row_sums == 0, 1, row_sums)
-  
-  # Calculate Moran's I
-  moran_result <- ape::Moran.I(residuos_loocv, pesos_espaciales)
-  
-  write.csv(
-    data.frame(observed = moran_result$observed, expected = moran_result$expected, sd = moran_result$sd, p_value = moran_result$p.value),
-    file.path(outdir, paste0(sp_name, "_Moran_I_LOOCV_residuals.csv")),
-    row.names = FALSE
-  )
+  # # Spatial autocorrelation with ape::Moran.I
+  # residuos_loocv <- data_sel_model$Ho - loocv_preds
+  # 
+  # # Ensure single POINT geometries and strip spatial units
+  # pts_sf <- sf::st_centroid(data_aggregated_sp)
+  # coords_dist_mat <- units::drop_units(sf::st_distance(pts_sf)) / 1000
+  # 
+  # # Build spatial weights matrix
+  # diag(coords_dist_mat) <- NA
+  # pesos_espaciales <- 1 / coords_dist_mat
+  # diag(pesos_espaciales) <- 0
+  # pesos_espaciales[is.na(pesos_espaciales) | is.infinite(pesos_espaciales)] <- 0
+  # 
+  # # Row-standardize weights
+  # row_sums <- rowSums(pesos_espaciales)
+  # pesos_espaciales <- pesos_espaciales / ifelse(row_sums == 0, 1, row_sums)
+  # 
+  # # Calculate Moran's I
+  # moran_result <- ape::Moran.I(residuos_loocv, pesos_espaciales)
+  # 
+  # write.csv(
+  #   data.frame(observed = moran_result$observed, expected = moran_result$expected, sd = moran_result$sd, p_value = moran_result$p.value),
+  #   file.path(outdir, paste0(sp_name, "_Moran_I_LOOCV_residuals.csv")),
+  #   row.names = FALSE
+  # )
   
   message("Process successfully finished for: ", sp_name)
   save.image(file.path(outdir, paste0(sp_name, "_Ho_Macrogenetics_Map_RF_final.RData")))
