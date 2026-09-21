@@ -187,7 +187,7 @@ RF_LOOCV <- function(outdir,
   
   message("Modelling with ", nrow(data_aggregated_sf), " aggregated grid cells/points.")
   
-  bios_focal <- terra::focal(bios, w = 15, fun = mean, na.policy = "only", na.rm = TRUE)
+  bios_focal <- terra::focal(bios, w = 15, fun = mean, na.policy = "only", na.rm = TRUE,cores=N_CORES)
   gc()
   
   unique_points_vect <- terra::vect(data_aggregated_sf)
@@ -560,6 +560,7 @@ CM <- RF_LOOCV(outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics/CM_
                raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
                data_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
                sdm_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
+               N_CORES = 12,
                boruta_threshold = 30,
                n_seeds = 30,
                cor_cutoff = 0.5,
@@ -572,7 +573,7 @@ CM2 <- RF_LOOCV(outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics/CM
                 raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
                 data_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
                 sdm_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
-                N_CORES = 8,
+                N_CORES = 12,
                 boruta_threshold = 30,
                 n_seeds = 30,
                 cor_cutoff = 0.5,
@@ -583,7 +584,7 @@ CM3 <- RF_LOOCV(outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics/CM
                 raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
                 data_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
                 sdm_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
-                N_CORES = 8,
+                N_CORES = 12,
                 boruta_threshold = 30,
                 n_seeds = 30,
                 cor_cutoff = 0.5,
@@ -596,7 +597,7 @@ CM4 <- RF_LOOCV(outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics/CM
                 raster_dir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s",
                 data_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx",
                 sdm_path = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval/Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif",
-                N_CORES = 8,
+                N_CORES = 12,
                 boruta_threshold = 30,
                 n_seeds = 30,
                 cor_cutoff = 0.5,
