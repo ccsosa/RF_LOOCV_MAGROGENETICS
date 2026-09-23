@@ -1,7 +1,7 @@
 #' @title Spatial Interpolation, Cross-Validation, and Mapping of Genetic Diversity (Ho)
 #' @description Encapsulated function to process genetic data, aggregate by SDM cells, 
 #' optimize IDW power, evaluate via LOOCV, and generate high-resolution maps and GeoTiffs.
-#' @author Jorge (Modified via AI collaborator)
+#' @author Chrystian Sosa (Modified via AI collaborator)
 #' @date 2026-09-22
 
 # 1. Load Required Libraries ----------------------------------------------
@@ -162,7 +162,6 @@ run_idw_analysis(
   outdir = "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics/IDW_CA",
   suffix = "_IDW"
 )
-
 
 run_idw_analysis(
   sp_name = "Crocodylus moreletii",
