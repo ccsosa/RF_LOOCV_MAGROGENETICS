@@ -77,14 +77,15 @@ run_idw_analysis <- function(
   mse_result <- NULL
   
   for(power in powers){
-    CV_idw <- spatstat.explore::idw(ppp_obj, power = power, at = "points")
+    CV_idw <- spatstat.explore::idw(ppp_obj, power = power, at = "points",leaveoneout=T)
     mse_result <- c(mse_result, Metrics::mse(ppp_obj$marks, CV_idw))
   }
   
   optimal_power <- powers[which.min(mse_result)]
   
   # Evaluation metrics (LOOCV predictions)
-  cv_preds <- spatstat.explore::idw(ppp_obj, power = optimal_power, at = "points", leaveoneout = TRUE)
+  cv_preds <- spatstat.explore::idw(ppp_obj, power = optimal_power, 
+                                    at = "pixels", leaveoneout = TRUE)
   rmse_val <- Metrics::rmse(ppp_obj$marks, as.numeric(cv_preds))
   
   # Print key metrics directly to console
@@ -93,7 +94,7 @@ run_idw_analysis <- function(
   message(sprintf("LOOCV RMSE:    %.4f", rmse_val))
   
   # Performance Plot
-  train_preds <- as.numeric(spatstat.explore::idw(ppp_obj, power = optimal_power, at = "points", leaveoneout = FALSE))
+  train_preds <- as.numeric(spatstat.explore::idw(ppp_obj, power = optimal_power, at = "points", leaveoneout = T))
   train_df <- data.frame(Observed = ppp_obj$marks, Predicted = train_preds)
   n_samples <- nrow(data_aggregated)
   
