@@ -9,7 +9,7 @@
 #' @param cor_cutoff \code{numeric}. Absolute pairwise Pearson correlation threshold. Default is \code{0.5}.
 #' @param addLonLat \code{logical}. Retain explicit lon/lat coordinates. Default is \code{FALSE}.
 #' @param use_loocv \code{logical}. If \code{TRUE}, executes LOOCV (ignored if \code{use_blockcv = TRUE}). Default is \code{FALSE}.
-#' @param use_blockcv \code{logical}. If \code{TRUE} and points >= 100, executes Spatial Block CV via \code{blockCV}. Default is \code{FALSE}.
+#' @param use_blockcv \code{logical}. If \code{TRUE} and points >= 50, executes Spatial Block CV via \code{blockCV}. Default is \code{FALSE}.
 #' @param kernel_type \code{character}. SVM kernel (\code{"svmRadial"} or \code{"svmLinear"}). Default is \code{"svmRadial"}.
 #' @param aggregate_occs_cells \code{logical}. Aggregate occurrences by raster cell. Default is \code{TRUE}.
 #'
@@ -137,8 +137,8 @@ svr_ho_pipeline <- function(outdir,
   data_aggregated_sp <- cbind(data_aggregated_sf, ext_direct_clean)
   rm(ext_direct_clean); gc()
   
-  if(nrow(data_aggregated_sp)>99){
-    message("more than 100 occurrences are availables, performing spatial thin at 5 km")
+  if(nrow(data_aggregated_sp)>50){
+    message("more than 50 occurrences are availables, performing spatial thin at 5 km")
     data_aggregated_sp <- terra::thin(vect(data_aggregated_sp),5000)
     data_aggregated_sp<- st_as_sf(data_aggregated_sp)
   }  # ------------------------------------------------------------------------------
@@ -178,6 +178,22 @@ svr_ho_pipeline <- function(outdir,
   }
   
   
+  #data used for model in CSV
+  if(isTRUE(aggregate_occs_cells)){
+    file_to_save <- file.path(outdir, paste0(sp_name, "_data_used_for_model_CELLS", ".csv"))
+  } else {
+    file_to_save <- file.path(outdir, paste0(sp_name, "_data_used_for_model_POINTS",  ".csv"))
+  }
+  write.csv(data_sel_model, file_to_save, row.names = FALSE)
+  
+  #predictor list
+  if(isTRUE(aggregate_occs_cells)){
+    file_to_save <- file.path(outdir, paste0(sp_name, "predictor_CELLS", ".csv"))
+  } else {
+    file_to_save <- file.path(outdir, paste0(sp_name, "predictor_points",  ".csv"))
+  }
+  write.csv(predictors_list, file_to_save, row.names = FALSE)
+  
   # ------------------------------------------------------------------------------
   # 4. SVR MODEL TRAINING & VALIDATION SCHEME EVALUATION
   # ------------------------------------------------------------------------------
@@ -191,15 +207,15 @@ svr_ho_pipeline <- function(outdir,
   applied_blockcv <- FALSE
   
   if (isTRUE(use_blockcv)) {
-    if (n_samples >= 100) {
-      message(sprintf("Validation scheme: Spatial Block Cross-Validation (blockCV) [n = %d >= 100]", n_samples))
+    if (n_samples >= 50) {
+      message(sprintf("Validation scheme: Spatial Block Cross-Validation (blockCV) [n = %d >= 50]", n_samples))
       
       data_sf_model <- data_aggregated_sp[valid_rows, ]
       
       set.seed(123)
       sb <- blockCV::cv_spatial(
         x = data_sf_model,
-        k = 5,
+        k = 4,
         selection = "random",
         progress = FALSE
       )
@@ -223,7 +239,7 @@ svr_ho_pipeline <- function(outdir,
       applied_blockcv <- TRUE
       
     } else {
-      message(sprintf("[ESCENARIO DESCARTADO] 'use_blockcv = TRUE' solicitado, pero n = %d (< 100).", n_samples))
+      message(sprintf("[ESCENARIO DESCARTADO] 'use_blockcv = TRUE' solicitado, pero n = %d (< 7).", n_samples))
       message("--> Finalizando ejecucion de este escenario sin generar resultados.\n")
       return(NULL)
     }
@@ -268,9 +284,11 @@ svr_ho_pipeline <- function(outdir,
   
   if (kernel_type == "svmRadial") {
     svm_grid <- expand.grid(
-      sigma = c(0.0005, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1),
-      C     = c(0.05, 0.1, 0.5, 1, 2, 5, 10, 20)
+      sigma = c(0.0005, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1,0.5,1),
+      C     = c(0.05, 0.1, 0.5, 1, 2, 5, 10, 20,50,100)
     )
+    
+
     final_svr <- caret::train(
       Ho ~ .,
       data       = data_sel_model,
@@ -319,19 +337,25 @@ svr_ho_pipeline <- function(outdir,
   if (kernel_type == "svmRadial") {
     best_sig <- final_svr$bestTune$sigma
     best_c   <- final_svr$bestTune$C
-    cv_preds_raw <- final_svr$pred %>%
-      dplyr::filter(abs(sigma - best_sig) < 1e-7, abs(C - best_c) < 1e-7)
-  } else {
+    cv_preds_raw <- dplyr::inner_join(
+      final_svr$pred, 
+      final_svr$bestTune, 
+      by = names(final_svr$bestTune)
+    )  } else {
     best_c   <- final_svr$bestTune$C
-    cv_preds_raw <- final_svr$pred %>%
-      dplyr::filter(abs(C - best_c) < 1e-7)
+    cv_preds_raw <- dplyr::inner_join(
+      final_svr$pred, 
+      final_svr$bestTune, 
+      by = names(final_svr$bestTune)
+    )
   }
   
+  # Si el esquema incluye repeticiones (ej. repeatedcv), promediamos por observacion (rowIndex)
   cv_df <- cv_preds_raw %>%
     dplyr::group_by(rowIndex) %>%
     dplyr::summarise(
-      Observed  = mean(obs, na.rm = TRUE),
-      Predicted = mean(pred, na.rm = TRUE),
+      Observed  = mean(obs, na.rm = TRUE),             # Es idéntico en todas las repeticiones
+      Predicted = mean(pred, na.rm = TRUE), # Promedio de predicción fuera de pliegue
       .groups   = "drop"
     ) %>%
     dplyr::arrange(rowIndex)
@@ -515,15 +539,15 @@ svr_ho_pipeline <- function(outdir,
 # ==============================================================================
 # CONFIGURACIÓN GENERAL DE RUTAS Y PARÁMETROS
 # ==============================================================================
-out_dir    <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics"
-r_dir      <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s"
-d_path     <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx"
-sdm_base   <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval"
+out_dir    <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/test_macrogenetics" #donde se guardan
+r_dir      <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/RASTER/test_layers_30s" #ruta de las capas
+d_path     <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/Datos Genéticos/Tabla_to_model.xlsx" #tabla de entrada (Ho)
+sdm_base   <- "D:/PROGRAMAS/Dropbox/TESIS_JORGE/ENMeval" #irectorio donde estan los modelos binarizados
 # =============================================================================
 # 1. DEFINICIÓN DE RUTAS BASE
 # =============================================================================
-sdm_ca <- file.path(sdm_base, "Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif")
-sdm_cm <- file.path(sdm_base, "Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif")
+sdm_ca <- file.path(sdm_base, "Crocodylus_acutus/Crocodylus_acutus_Binario_P10.tif") #C. acutus (SDM 1)
+sdm_cm <- file.path(sdm_base, "Crocodylus_moreletii/Crocodylus_moreletii_Binario_P10.tif") #C. moreletti (SDM 1)
 
 # Mapas de información por especie y tipo de validación cruzada
 species_info <- list(
@@ -541,10 +565,15 @@ cv_configs <- list(
 # 2. GENERACIÓN DE LA GRILLA DE ESCENARIOS
 # =============================================================================
 scenarios_grid <- expand.grid(
-  sp_code              = c("CA", "CM"),
+  sp_code              = c("CA", 
+                           "CM"),
   aggregate_occs_cells = c(TRUE, FALSE),
   addLonLat            = c(TRUE, FALSE),
-  cv_type              = c("LOOCV", "BLOCKCV", "KFOLD"),
+  cv_type              = c(
+                          "LOOCV",
+                           "BLOCKCV",
+                           "KFOLD"
+                           ),
   stringsAsFactors     = FALSE
 )
 
@@ -555,7 +584,7 @@ cat("Total de escenarios a ejecutar:", nrow(scenarios_grid), "\n")
 # =============================================================================
 results <- list()
 
-for (i in 9:nrow(scenarios_grid)) {
+for (i in 1:nrow(scenarios_grid)) {
   
   row <- scenarios_grid[i, ]
   
